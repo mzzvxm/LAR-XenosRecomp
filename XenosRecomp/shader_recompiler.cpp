@@ -1337,8 +1337,52 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     out += "\n#else\n\n";
 
-    println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
+    const uint32_t registerFileSize = isPixelShader ? 224 : 256;
+
+    // The D3D9 effect framework happily lets two parameters share float4
+    // registers when they can never be live at the same time, e.g. Midnight
+    // Club's gBoneMtx[] sitting on top of gCarConstantBuffer[]. HLSL rejects
+    // overlapping packoffset declarations outright, so those shaders declare the
+    // whole constant register file as one array and alias each parameter onto it
+    // with a macro instead. The generated code is identical either way; only the
+    // declaration form changes. Non-overlapping shaders keep the packoffset form
+    // so the common case stays untouched.
+    bool hasOverlappingConstants = false;
+    {
+        std::vector<bool> occupied(registerFileSize, false);
+        for (uint32_t i = 0; i < constantTableContainer->constantTable.constants && !hasOverlappingConstants; i++)
+        {
+            const auto constantInfo = reinterpret_cast<const ConstantInfo*>(
+                constantTableData + constantTableContainer->constantTable.constantInfo + i * sizeof(ConstantInfo));
+
+            if (constantInfo->registerSet != RegisterSet::Float4)
+                continue;
+
+            for (uint16_t j = 0; j < constantInfo->registerCount; j++)
+            {
+                uint32_t reg = constantInfo->registerIndex + j;
+                if (reg >= registerFileSize)
+                    break;
+
+                if (occupied[reg])
+                {
+                    hasOverlappingConstants = true;
+                    break;
+                }
+                occupied[reg] = true;
+            }
+        }
+    }
+
+    const bool useConstantRegisterFile = hasOverlappingConstants;
+
+    const char* shaderStageName = isPixelShader ? "Pixel" : "Vertex";
+
+    println("cbuffer {}ShaderConstants : register(b{}, space4)", shaderStageName, isPixelShader ? 1 : 0);
     out += "{\n";
+
+    if (useConstantRegisterFile)
+        println("\tfloat4 g_{}ShaderConstantFile[{}] : packoffset(c0);", shaderStageName, registerFileSize);
 
     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
     {
@@ -1348,6 +1392,23 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         if (constantInfo->registerSet == RegisterSet::Float4)
         {
             const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
+            uint32_t tailCount = registerFileSize - constantInfo->registerIndex;
+
+            if (useConstantRegisterFile)
+            {
+                if (constantInfo->registerCount > 1)
+                {
+                    println("#define {0}(INDEX) select((INDEX) < {1}, g_{2}ShaderConstantFile[{3} + min(INDEX, {4})], 0.0)",
+                        constantName, tailCount, shaderStageName, constantInfo->registerIndex.get(), tailCount - 1);
+                }
+                else
+                {
+                    println("#define {} g_{}ShaderConstantFile[{}]",
+                        constantName, shaderStageName, constantInfo->registerIndex.get());
+                }
+
+                continue;
+            }
 
             print("\tfloat4 {}", constantName);
 
@@ -1357,10 +1418,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             println(" : packoffset(c{});", constantInfo->registerIndex.get());
 
             if (constantInfo->registerCount > 1)
-            {
-                uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
                 println("#define {0}(INDEX) select((INDEX) < {1}, {0}[min(INDEX, {2})], 0.0)", constantName, tailCount, tailCount - 1);
-            }
         }
     }
 
