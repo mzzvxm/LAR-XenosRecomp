@@ -93,7 +93,10 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
     { DeclUsage::TexCoord, 5, 13 },
     { DeclUsage::TexCoord, 6, 14 },
     { DeclUsage::TexCoord, 7, 15 },
-    { DeclUsage::Position, 1, 15 },
+    // POSITION1 previously shared location 15 with TEXCOORD7, which is a SPIR-V
+    // validation error for any vertex shader declaring both. Midnight Club uses
+    // POSITION1 as a real vertex element in 8 shaders, so it gets its own slot.
+    { DeclUsage::Position, 1, 16 },
 };
 
 static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
@@ -115,7 +118,12 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
     { DeclUsage::TexCoord, 14 },
     { DeclUsage::TexCoord, 15 },
     { DeclUsage::Color, 0 },
-    { DeclUsage::Color, 1 }
+    { DeclUsage::Color, 1 },
+    // Declared for every stage so the vertex output and pixel input signatures
+    // stay identical across all shaders. Midnight Club exports POSITION1 as an
+    // interpolator (one vertex/pixel pair); without it the generated code
+    // referenced an oPosition1/iPosition1 that was never in the entry signature.
+    { DeclUsage::Position, 1 }
 };
 
 static constexpr std::string_view TEXTURE_DIMENSIONS[] =
