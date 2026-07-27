@@ -26,10 +26,18 @@ struct PushConstants
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
 
-#define g_Booleans                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256)
-#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
-#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
-#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
+// Descriptor index tables are indexed by the Xenos fetch constant slot (0-31),
+// not by the per-stage D3D9 sampler register, so each table is 32 uints wide and
+// pixel/vertex samplers can never collide. Layout:
+//   [  0.. 127] Texture2D descriptor indices   (32 slots)
+//   [128.. 255] Texture3D descriptor indices   (32 slots)
+//   [256.. 383] TextureCube descriptor indices (32 slots)
+//   [384.. 511] Sampler descriptor indices     (32 slots)
+//   [512..    ] scalars below
+#define g_Booleans                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 512)
+#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 516)
+#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 520)
+#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 528)
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 
@@ -37,11 +45,13 @@ struct PushConstants
 
 #else
 
+// Mirrors the __spirv__ byte layout above: 4 tables of 32 uints (c0-c31), then
+// the scalars starting at c32.
 #define DEFINE_SHARED_CONSTANTS() \
-    uint g_Booleans : packoffset(c16.x); \
-    uint g_SwappedTexcoords : packoffset(c16.y); \
-    float2 g_HalfPixelOffset : packoffset(c16.z); \
-    float g_AlphaThreshold : packoffset(c17.x);
+    uint g_Booleans : packoffset(c32.x); \
+    uint g_SwappedTexcoords : packoffset(c32.y); \
+    float2 g_HalfPixelOffset : packoffset(c32.z); \
+    float g_AlphaThreshold : packoffset(c33.x);
 
 uint g_SpecConstants();
 

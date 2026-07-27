@@ -118,12 +118,27 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
     { DeclUsage::Color, 1 }
 };
 
-static constexpr std::string_view TEXTURE_DIMENSIONS[] = 
+static constexpr std::string_view TEXTURE_DIMENSIONS[] =
 {
     "2D",
-    "3D", 
-    "Cube" 
+    "3D",
+    "Cube"
 };
+
+// The Xenos texture fetch constant file has 32 slots shared by both stages.
+// Xbox 360 D3D9 hands slots 0-15 to the pixel shader and 16-31 to the vertex
+// shader, so a `sampler` declared at register s0 inside a vs_3_0 shader is
+// addressed as fetch constant 16 by the tfetch instructions in its ISA. The CTAB
+// only ever records the per-stage D3D register index, so the hardware slot has to
+// be reconstructed here. Getting this wrong meant every vertex texture fetch in
+// Midnight Club: Los Angeles resolved against a sampler that was never declared.
+static constexpr uint32_t FETCH_CONSTANT_SLOT_COUNT = 32;
+static constexpr uint32_t VERTEX_SHADER_FETCH_CONSTANT_BASE = 16;
+
+static uint32_t getFetchConstantSlot(uint32_t registerIndex, bool isPixelShader)
+{
+    return isPixelShader ? registerIndex : (registerIndex + VERTEX_SHADER_FETCH_CONSTANT_BASE);
+}
 
 static FetchDestinationSwizzle getDestSwizzle(uint32_t dstSwizzle, uint32_t index)
 {
@@ -1171,16 +1186,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
         case RegisterSet::Sampler:
         {
+            uint32_t fetchSlot = getFetchConstantSlot(constantInfo->registerIndex, isPixelShader);
+
             for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
             {
                 println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
-                    constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4);
+                    constantName, TEXTURE_DIMENSIONS[j], j * FETCH_CONSTANT_SLOT_COUNT * 4 + fetchSlot * 4);
             }
 
             println("#define {}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
-                constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
+                constantName, std::size(TEXTURE_DIMENSIONS) * FETCH_CONSTANT_SLOT_COUNT * 4 + fetchSlot * 4);
 
-            samplers.emplace(constantInfo->registerIndex, constantName);
+            samplers.emplace(fetchSlot, constantName);
             break;
         }
 
@@ -1230,14 +1247,17 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         {
             const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
 
+            uint32_t fetchSlot = getFetchConstantSlot(constantInfo->registerIndex, isPixelShader);
+            constexpr uint32_t slotRegisters = FETCH_CONSTANT_SLOT_COUNT / 4;
+
             for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
             {
                 println("\tuint {}_Texture{}DescriptorIndex : packoffset(c{}.{});",
-                    constantName, TEXTURE_DIMENSIONS[j], j * 4 + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]);
+                    constantName, TEXTURE_DIMENSIONS[j], j * slotRegisters + fetchSlot / 4, SWIZZLES[fetchSlot % 4]);
             }
 
             println("\tuint {}_SamplerDescriptorIndex : packoffset(c{}.{});",
-                constantName, 4 * std::size(TEXTURE_DIMENSIONS) + constantInfo->registerIndex / 4, SWIZZLES[constantInfo->registerIndex % 4]);
+                constantName, slotRegisters * std::size(TEXTURE_DIMENSIONS) + fetchSlot / 4, SWIZZLES[fetchSlot % 4]);
         }
     }
 
