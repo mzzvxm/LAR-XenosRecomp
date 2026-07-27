@@ -75,6 +75,49 @@ float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
     return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
 }
 
+// Explicit LOD / LOD bias / explicit gradient variants.
+//
+// A Xenos tfetch only takes the gradient path when the "use computed LOD" bit is
+// set AND the stage can actually produce derivatives. Vertex shaders have no
+// quads, so a vertex tfetch is always an explicit LOD fetch on hardware; emitting
+// Sample() for one is rejected outright by both DXIL validation ("Opcode Sample
+// not valid in shader model vs") and SPIR-V ("sampling with implicit lod is only
+// allowed in fragment and compute shaders"). The register LOD written by
+// setTexLOD and the instruction LOD bias fold into a plain LOD bias when
+// gradients are in play, which is what SampleBias does.
+float4 tfetch2DLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float lod)
+{
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), lod);
+}
+
+float4 tfetch2DBias(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float bias)
+{
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    return texture.SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), bias);
+}
+
+float4 tfetch2DGrad(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float2 gradientH, float2 gradientV)
+{
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    return texture.SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), gradientH, gradientV);
+}
+
+// Xenos getCompTexLOD returns the LOD the hardware would pick for these
+// coordinates, broadcast across the destination components.
+float4 getCompTexLod2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord)
+{
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    return texture.CalculateLevelOfDetail(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord).xxxx;
+}
+
+// Xenos getGradients packs the coarse screen-space derivatives of the first two
+// source components as (ddx.x, ddy.x, ddx.y, ddy.y).
+float4 getGradients(float2 texCoord)
+{
+    return float4(ddx_coarse(texCoord.x), ddy_coarse(texCoord.x), ddx_coarse(texCoord.y), ddy_coarse(texCoord.y));
+}
+
 float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
 {
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
@@ -158,6 +201,21 @@ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
     return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
 }
 
+float4 tfetch3DLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float lod)
+{
+    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, lod);
+}
+
+float4 tfetch3DBias(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float bias)
+{
+    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, bias);
+}
+
+float4 tfetch3DGrad(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float3 gradientH, float3 gradientV)
+{
+    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, gradientH, gradientV);
+}
+
 struct CubeMapData
 {
     float3 cubeMapDirections[2];
@@ -167,6 +225,21 @@ struct CubeMapData
 float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
 {
     return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
+}
+
+float4 tfetchCubeLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float lod)
+{
+    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], lod);
+}
+
+float4 tfetchCubeBias(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float bias)
+{
+    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], bias);
+}
+
+float4 tfetchCubeGrad(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float3 gradientH, float3 gradientV)
+{
+    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], gradientH, gradientV);
 }
 
 float4 tfetchR11G11B10(uint4 value)

@@ -240,8 +240,19 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
 
 void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
 {
-    if (instr.opcode != FetchOpcode::TextureFetch && instr.opcode != FetchOpcode::GetTextureWeights)
+    switch (instr.opcode)
+    {
+    case FetchOpcode::TextureFetch:
+    case FetchOpcode::GetTextureWeights:
+    case FetchOpcode::GetTextureComputedLod:
+    case FetchOpcode::GetTextureGradients:
+    case FetchOpcode::SetTextureLod:
+    case FetchOpcode::SetTextureGradientsHorz:
+    case FetchOpcode::SetTextureGradientsVert:
+        break;
+    default:
         return;
+    }
 
     if (instr.isPredicated)
     {
@@ -260,6 +271,61 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
             for (size_t i = 0; i < componentCount; i++)
                 out += SWIZZLES[((instr.srcSwizzle >> (i * 2))) & 0x3];
         };
+
+    auto closePredication = [&]()
+        {
+            if (instr.isPredicated)
+            {
+                --indentation;
+                indent();
+                out += "}\n";
+            }
+        };
+
+    // setTexLOD / setGradients only update the implicit fetch state registers;
+    // they never write a destination register.
+    switch (instr.opcode)
+    {
+    case FetchOpcode::SetTextureLod:
+    {
+        indent();
+        out += "tfetchLod = ";
+        printSrcRegister(1);
+        out += ";\n";
+        closePredication();
+        return;
+    }
+
+    case FetchOpcode::SetTextureGradientsHorz:
+    case FetchOpcode::SetTextureGradientsVert:
+    {
+        indent();
+        print("tfetchGradient{} = ", instr.opcode == FetchOpcode::SetTextureGradientsHorz ? "H" : "V");
+        printSrcRegister(3);
+        out += ";\n";
+        closePredication();
+        return;
+    }
+
+    default:
+        break;
+    }
+
+    // getGradients does not touch a texture at all.
+    if (instr.opcode == FetchOpcode::GetTextureGradients)
+    {
+        indent();
+        print("r{}.", instr.dstRegister);
+        printDstSwizzle(instr.dstSwizzle, false);
+        out += " = getGradients(";
+        printSrcRegister(2);
+        out += ").";
+        printDstSwizzle(instr.dstSwizzle, true);
+        out += ";\n";
+        printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
+        closePredication();
+        return;
+    }
 
     std::string constName;
     const char* constNamePtr = nullptr;
@@ -296,6 +362,37 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     print("r{}.", instr.dstRegister);
     printDstSwizzle(instr.dstSwizzle, false);
 
+    // A Xenos tfetch only derives its LOD from gradients when the "use computed
+    // LOD" bit is set and the stage can produce them: vertex shaders have no
+    // derivatives, so unless explicit register gradients were supplied the fetch
+    // is an explicit LOD fetch. This mirrors Xenia's translator.
+    const bool useComputedLod = instr.useCompLod && (isPixelShader || instr.useRegGradients);
+    const bool useRegisterGradients = useComputedLod && instr.useRegGradients && usesTextureGradientRegisters;
+    const bool useRegisterLod = instr.useRegLod && usesTextureLodRegister;
+    const float instructionLodBias = instr.lodBias * (1.0f / 16.0f);
+
+    // Register LOD and instruction LOD bias both add to the sampled LOD.
+    std::string lodExpression;
+    if (useRegisterLod)
+        lodExpression = "tfetchLod";
+    if (instructionLodBias != 0.0f)
+        lodExpression += (lodExpression.empty() ? fmt::format("{}", instructionLodBias) : fmt::format(" + {}", instructionLodBias));
+
+    const bool isTextureFetch = instr.opcode == FetchOpcode::TextureFetch;
+
+    // Suffix selects the sampling form: gradients, explicit LOD, LOD bias, or the
+    // plain implicit-derivative Sample that the vast majority of fetches use.
+    const char* fetchSuffix = "";
+    if (isTextureFetch)
+    {
+        if (useRegisterGradients)
+            fetchSuffix = "Grad";
+        else if (!useComputedLod)
+            fetchSuffix = "Lod";
+        else if (!lodExpression.empty())
+            fetchSuffix = "Bias";
+    }
+
     out += " = ";
     switch (instr.opcode)
     {
@@ -312,6 +409,11 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     case FetchOpcode::GetTextureWeights:
     {
         out += "getWeights";
+        break;
+    }
+    case FetchOpcode::GetTextureComputedLod:
+    {
+        out += "getCompTexLod";
         break;
     }
     }
@@ -346,17 +448,46 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
         out += "Bicubic";
 #endif
 
+    out += fetchSuffix;
+
     print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
     printSrcRegister(componentCount);
 
-    switch (instr.dimension)
+    // getCompTexLod takes no pixel offset; every other form keeps the existing
+    // argument list.
+    if (instr.opcode != FetchOpcode::GetTextureComputedLod)
     {
-    case TextureDimension::Texture2D:
-        print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
-        break;
-    case TextureDimension::TextureCube:
-        out += ", cubeMapData";
-        break;
+        switch (instr.dimension)
+        {
+        case TextureDimension::Texture2D:
+            print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
+            break;
+        case TextureDimension::TextureCube:
+            out += ", cubeMapData";
+            break;
+        }
+    }
+
+    if (isTextureFetch)
+    {
+        if (useRegisterGradients)
+        {
+            // Xenia folds the register LOD and instruction bias into a gradient
+            // scale of exp2(lod), which is exactly what biasing the LOD does.
+            const char* swizzle = (componentCount == 3) ? ".xyz" : ".xy";
+            if (lodExpression.empty())
+                print(", tfetchGradientH{0}, tfetchGradientV{0}", swizzle);
+            else
+                print(", tfetchGradientH{0} * exp2({1}), tfetchGradientV{0} * exp2({1})", swizzle, lodExpression);
+        }
+        else if (!useComputedLod)
+        {
+            print(", {}", lodExpression.empty() ? "0.0" : lodExpression);
+        }
+        else if (!lodExpression.empty())
+        {
+            print(", {}", lodExpression);
+        }
     }
 
     out += ").";
@@ -1540,12 +1671,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         for (auto& cfInstr : controlFlow)
         {
             uint32_t address = 0;
+            bool isExecBlock = false;
 
             switch (cfInstr.opcode)
             {
             case ControlFlowOpcode::Exec:
             case ControlFlowOpcode::ExecEnd:
                 address = cfInstr.exec.address;
+                isExecBlock = true;
                 break;
 
             case ControlFlowOpcode::CondExec:
@@ -1553,11 +1686,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             case ControlFlowOpcode::CondExecPredClean:
             case ControlFlowOpcode::CondExecPredCleanEnd:
                 address = cfInstr.condExec.address;
+                isExecBlock = true;
                 break;
 
             case ControlFlowOpcode::CondExecPred:
             case ControlFlowOpcode::CondExecPredEnd:
                 address = cfInstr.condExecPred.address;
+                isExecBlock = true;
                 break;
 
             case ControlFlowOpcode::CondJmp:
@@ -1573,10 +1708,46 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             if (address != 0)
                 instrSize = std::min<uint32_t>(instrSize, address * 12);
+
+            // Find out whether the shader writes the implicit texture fetch state
+            // registers before any sample is emitted, so fetches that reference
+            // them can pick the right sampling form.
+            if (isExecBlock)
+            {
+                uint32_t sequence = cfInstr.exec.sequence;
+                for (uint32_t i = 0; i < cfInstr.exec.count; i++, sequence >>= 2)
+                {
+                    if ((sequence & 0x1) == 0)
+                        continue;
+
+                    switch (FetchOpcode(code[(address + i) * 3].get() & 0x1F))
+                    {
+                    case FetchOpcode::SetTextureLod:
+                        usesTextureLodRegister = true;
+                        break;
+                    case FetchOpcode::SetTextureGradientsHorz:
+                    case FetchOpcode::SetTextureGradientsVert:
+                        usesTextureGradientRegisters = true;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
         }
 
         controlFlowCode += 3;
         instrAddress += 12;
+    }
+
+    // Emitted only for shaders that actually issue setTexLOD / setGradients, so
+    // the generated code for everything else is unchanged.
+    if (usesTextureLodRegister)
+        out += "\tfloat tfetchLod = 0.0;\n";
+    if (usesTextureGradientRegisters)
+    {
+        out += "\tfloat3 tfetchGradientH = 0.0;\n";
+        out += "\tfloat3 tfetchGradientV = 0.0;\n";
     }
 
     if (simpleControlFlow)

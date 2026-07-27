@@ -34,6 +34,12 @@ struct ShaderRecompiler : StringBuffer
     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
     uint32_t specConstantsMask = 0;
 
+    // Set by a pre-pass over the control flow when the shader actually issues
+    // setTexLOD / setGradientsHorz / setGradientsVert. Shaders that never touch
+    // the implicit fetch state keep emitting plain Sample() calls.
+    bool usesTextureLodRegister = false;
+    bool usesTextureGradientRegisters = false;
+
 #ifdef UNLEASHED_RECOMP
     bool hasMtxProjection = false;
     bool hasMtxPrevInvViewProjection = false;
