@@ -11,7 +11,7 @@ DxcCompiler::~DxcCompiler()
     dxcCompiler->Release();
 }
 
-IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv)
+IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv, std::string* errorsOut)
 {
     DxcBuffer source{};
     source.Ptr = shaderSource.c_str();
@@ -78,9 +78,16 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
                 hr = result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
                 assert(SUCCEEDED(hr) && errors != nullptr);
 
-                fputs(errors->GetStringPointer(), stderr);
+                if (errorsOut != nullptr)
+                    errorsOut->assign(errors->GetStringPointer(), errors->GetStringLength());
+                else
+                    fputs(errors->GetStringPointer(), stderr);
 
                 errors->Release();
+            }
+            else if (errorsOut != nullptr)
+            {
+                *errorsOut = "DXC failed without emitting diagnostics.";
             }
         }
         else
@@ -94,6 +101,9 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
     else
     {
         assert(result == nullptr);
+
+        if (errorsOut != nullptr)
+            *errorsOut = fmt::format("IDxcCompiler3::Compile failed with HRESULT 0x{:08X}.", uint32_t(hr));
     }
 
     return object;
