@@ -1574,10 +1574,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
         }
 
+        // The Xenos preloads the vertex index into r0.x at vertex shader entry.
+        // MCLA's billboard shaders depend on it: xPropFoliageImpostor computes
+        // `r0.x % 4` to select a corner out of a four-entry table (uvs[4], the
+        // UV/sign pairs of a quad), and the vfetch that reads POSITION takes its
+        // index from `trunc(r0.x / 4)`. Without the input r0.x is a constant 0,
+        // every corner selects entry 0, and each quad is assembled from four
+        // DIFFERENT props -- one enormous black wedge per draw.
+        //
+        // Not gated on a game-specific constant: r0.x is the vertex index on the
+        // hardware for every vertex shader, and 278 of MCLA's 1279 read it before
+        // writing it. Shaders that write r0 first keep their own value, because
+        // the initialiser below only runs for registers nothing else assigns.
+        out += "\tin uint iVertexId : SV_VertexID,\n";
     #ifdef UNLEASHED_RECOMP
         if (hasIndexCount)
         {
-            out += "\tin uint iVertexId : SV_VertexID,\n";
             out += "\tin uint iInstanceId : SV_InstanceID,\n";
         }
     #endif
@@ -1707,6 +1719,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
             }
         #endif
+            else if (!isPixelShader && i == 0)
+            {
+                // The vertex index the hardware preloads. See the SV_VertexID
+                // declaration above for why this is not optional.
+                out += "float4(iVertexId, 0.0, 0.0, 0.0);\n";
+            }
             else
             {
                 out += "0.0;\n";
