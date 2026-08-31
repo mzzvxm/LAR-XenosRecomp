@@ -13,11 +13,29 @@ static constexpr char SWIZZLES[] =
     '_'
 };
 
+// How each vertex input is declared in the generated HLSL. This is a contract
+// with the host: the type here has to match the family of the vertex format the
+// host binds, because the recompiled code assigns the input straight into an
+// ALU register and the microcode's own constants do the rest.
+//
+// NORMAL/TANGENT/BINORMAL are uint4 on purpose - they carry a packed
+// R11G11B10 that tfetchR11G11B10() unpacks in the shader.
+//
+// BLENDINDICES is float4, NOT uint4. The Xenos fetches blend indices through
+// the D3DCOLOR declaration type, which the hardware NORMALISES: the shader sees
+// index/255 and the microcode scales it back with its own constant (measured in
+// Midnight Club: Los Angeles, c254.z = 765.006 = 255 * 3, three constant
+// registers per bone). Declaring the input uint4 hands the ALU the raw byte
+// instead, so that constant overshoots by 255x: bone 1 lands at register 765,
+// the shader's own min(index, 191) clamp catches it, and every vertex not bound
+// to bone 0 collapses onto the same matrix - the whole skinned mesh folds into a
+// sliver. Keeping it float4 lets the host bind the normalised 8-bit format the
+// declaration already asks for.
 static constexpr const char* USAGE_TYPES[] =
 {
     "float4", // POSITION
     "float4", // BLENDWEIGHT
-    "uint4", // BLENDINDICES
+    "float4", // BLENDINDICES
     "uint4", // NORMAL
     "float4", // PSIZE
     "float4", // TEXCOORD
