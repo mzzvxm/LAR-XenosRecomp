@@ -555,6 +555,11 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
         SCALAR_CONSTANT_1
     };
 
+    // Set below when the scalar half of this instruction reads a GPR component
+    // that the vector half overwrites; the scalar operand then comes out of the
+    // psSrc snapshot instead of the clobbered register.
+    int scalarSnapshotRegister = -1;
+
     auto op = [&](size_t operand)
         {
             size_t reg = 0;
@@ -623,7 +628,11 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
 
             if (select)
             {
-                regFormatted = fmt::format("r{}", reg);
+                const bool scalarOperand = operand == SCALAR_0 || operand == SCALAR_1 || operand == SCALAR_CONSTANT_1;
+                if (scalarOperand && int(reg) == scalarSnapshotRegister)
+                    regFormatted = "psSrc";
+                else
+                    regFormatted = fmt::format("r{}", reg);
             }
             else
             {
@@ -838,6 +847,61 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
     uint32_t vectorWriteMask = instr.vectorWriteMask;
     if (instr.exportData)
         vectorWriteMask &= ~instr.scalarWriteMask;
+
+    // A Xenos ALU instruction issues its vector and scalar halves in the same
+    // cycle: both read the register file as it stood BEFORE the instruction, and
+    // only then are the results written back. Emitting the two halves as
+    // sequential statements breaks that whenever the scalar half reads a GPR
+    // component the vector half overwrites -- the compiler co-issues exactly
+    // those pairs, because the hardware makes them free. Snapshot the register
+    // before the vector write and read the scalar operand out of the snapshot.
+    if (vectorWriteMask != 0 && exportRegister.empty() && instr.scalarOpcode != AluScalarOpcode::RetainPrev)
+    {
+        const bool constantForm = instr.scalarOpcode >= AluScalarOpcode::Mulsc0 &&
+                                  instr.scalarOpcode <= AluScalarOpcode::Subsc1;
+
+        bool readsSecondOperand;
+        switch (instr.scalarOpcode)
+        {
+        case AluScalarOpcode::Adds:
+        case AluScalarOpcode::Muls:
+        case AluScalarOpcode::Maxs:
+        case AluScalarOpcode::Mins:
+        case AluScalarOpcode::MaxAs:
+        case AluScalarOpcode::MaxAsf:
+        case AluScalarOpcode::Subs:
+            readsSecondOperand = true;
+            break;
+        default:
+            readsSecondOperand = false;
+            break;
+        }
+
+        uint32_t scalarRegister = 0;
+        uint32_t componentMask = 0;
+
+        if (constantForm)
+        {
+            // SCALAR_CONSTANT_0 comes from the constant file; only the second
+            // operand of the *sc forms is a GPR, and its index is encoded here.
+            scalarRegister = (uint32_t(instr.scalarOpcode) & 1) | (instr.src3Select << 1) | (instr.src3Swizzle & 0x3C);
+            componentMask = 1u << (instr.src3Swizzle & 0x3);
+        }
+        else if (instr.src3Select && instr.scalarOpcode != AluScalarOpcode::SetpClr)
+        {
+            scalarRegister = instr.src3Register;
+            componentMask = 1u << (((instr.src3Swizzle >> 6) + 3) & 0x3);
+            if (readsSecondOperand)
+                componentMask |= 1u << (instr.src3Swizzle & 0x3);
+        }
+
+        if (componentMask != 0 && (scalarRegister & 0x3F) == instr.vectorDest && (componentMask & vectorWriteMask) != 0)
+        {
+            scalarSnapshotRegister = int(instr.vectorDest);
+            indent();
+            println("psSrc = r{};", instr.vectorDest);
+        }
+    }
 
     if (vectorWriteMask != 0)
     {
@@ -1736,6 +1800,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     out += "\tint aL = 0;\n";
     out += "\tbool p0 = false;\n";
     out += "\tfloat ps = 0.0;\n";
+    // Pre-instruction copy of a GPR the vector half is about to overwrite, so the
+    // scalar half of the same instruction still reads the value the hardware
+    // would have handed it.
+    out += "\tfloat4 psSrc = 0.0;\n";
     if (isPixelShader)
     {
 #ifdef UNLEASHED_RECOMP
