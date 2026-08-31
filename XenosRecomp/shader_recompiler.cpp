@@ -1464,7 +1464,126 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         }
     }
 
-    const bool useConstantRegisterFile = hasOverlappingConstants;
+    // A constant reached through a0/aL indexes the flat Xenos register file, so the
+    // read can land outside the array the constant table declares for that one
+    // parameter. Midnight Club's gCarMtxBuffer[60] sits at c64 and is read as
+    // gCarMtxBuffer(3 * boneIndex); the accessor allows up to 191, which is the
+    // distance to the end of the file, not the 60 the array has.
+    //
+    // In the packoffset form that read leaves the array. HLSL calls it undefined.
+    // DXC lowers it to a raw cbufferLoadLegacy at the computed register rather
+    // than clamping, so the right value only comes back while the bound view is
+    // larger than the cbuffer the shader declares -- the paint shader declares
+    // 3328 bytes and can read to byte 4080. A driver that bounds-checks against
+    // the declared size returns zero instead, and a zeroed transform row is a
+    // mesh collapsed to a point. The register-file form has no such dependency,
+    // and it is what the SPIR-V path above already does.
+    //
+    // Measured across Midnight Club's 2333 shaders: 491 index a constant past its
+    // declared size (gBoneMtx[144] clamped to 191 in 169 of them, gCarMtxBuffer[60]
+    // to 191 in 107), and only 7 were taking the register-file path.
+    bool hasRelativeConstantAddressing = false;
+    {
+        const auto shaderHeader = reinterpret_cast<const Shader*>(shaderData + shaderContainer->shaderOffset);
+        const be<uint32_t>* code = reinterpret_cast<const be<uint32_t>*>(
+            shaderData + shaderContainer->virtualSize + shaderHeader->physicalOffset);
+
+        union
+        {
+            ControlFlowInstruction controlFlow[2];
+            struct
+            {
+                uint32_t code0;
+                uint32_t code1;
+                uint32_t code2;
+                uint32_t code3;
+            };
+        };
+
+        auto controlFlowCode = code;
+        uint32_t instrAddress = 0;
+        uint32_t instrSize = shaderHeader->size;
+
+        while (instrAddress < instrSize && !hasRelativeConstantAddressing)
+        {
+            code0 = controlFlowCode[0];
+            code1 = controlFlowCode[1] & 0xFFFF;
+            code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
+            code3 = controlFlowCode[2] >> 16;
+
+            for (auto& cfInstr : controlFlow)
+            {
+                uint32_t address = 0;
+                uint32_t count = 0;
+
+                switch (cfInstr.opcode)
+                {
+                case ControlFlowOpcode::Exec:
+                case ControlFlowOpcode::ExecEnd:
+                    address = cfInstr.exec.address;
+                    count = cfInstr.exec.count;
+                    break;
+
+                case ControlFlowOpcode::CondExec:
+                case ControlFlowOpcode::CondExecEnd:
+                case ControlFlowOpcode::CondExecPredClean:
+                case ControlFlowOpcode::CondExecPredCleanEnd:
+                    address = cfInstr.condExec.address;
+                    count = cfInstr.condExec.count;
+                    break;
+
+                case ControlFlowOpcode::CondExecPred:
+                case ControlFlowOpcode::CondExecPredEnd:
+                    address = cfInstr.condExecPred.address;
+                    count = cfInstr.condExecPred.count;
+                    break;
+
+                default:
+                    continue;
+                }
+
+                instrSize = std::min<uint32_t>(instrSize, address * 12);
+
+                uint32_t sequence = cfInstr.exec.sequence;
+                for (uint32_t i = 0; i < count && !hasRelativeConstantAddressing; i++, sequence >>= 2)
+                {
+                    // Bit 0 of each pair marks a fetch instruction; ALU otherwise.
+                    if ((sequence & 0x1) != 0)
+                        continue;
+
+                    union
+                    {
+                        AluInstruction alu;
+                        struct
+                        {
+                            uint32_t alu0;
+                            uint32_t alu1;
+                            uint32_t alu2;
+                        };
+                    };
+
+                    const be<uint32_t>* aluCode = code + (address + i) * 3;
+                    alu0 = aluCode[0];
+                    alu1 = aluCode[1];
+                    alu2 = aluCode[2];
+
+                    if (alu.const0Relative || alu.const1Relative)
+                        hasRelativeConstantAddressing = true;
+                }
+
+                if (hasRelativeConstantAddressing)
+                    break;
+            }
+
+            controlFlowCode += 3;
+            instrAddress += 12;
+        }
+    }
+
+    // Either reason puts every parameter on the shared register file instead of
+    // its own packoffset array. The generated body is identical; only the
+    // declaration form changes.
+    const bool useConstantRegisterFile = hasOverlappingConstants || hasRelativeConstantAddressing;
 
     const char* shaderStageName = isPixelShader ? "Pixel" : "Vertex";
 
