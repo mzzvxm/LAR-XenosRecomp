@@ -242,15 +242,32 @@ float4 tfetchCubeGrad(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
     return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], gradientH, gradientV);
 }
 
+// Packed normal/tangent/binormal unpack.
+//
+// The spec-constant branch takes the RAW 32-bit vertex dword in value.x, so the
+// host must bind the attribute as R32_UINT for it. The other branch is the
+// pass-through for a normal that is already float data arriving through this
+// uint4-typed input, which asfloat() simply recovers.
+//
+// The packing is k_2_10_10_10 signed: three 10-bit two's-complement components
+// (the 2-bit W is unused by every shader that calls this). Measured on Midnight
+// Club: Los Angeles -- 2148 of 2158 normal/tangent attributes in one frame are
+// this format, and the raw dword 0x00000201 unpacks to exactly (-1, 0, 0),
+// length 1.000, where the older 11/11/10 reading gave (0.501, 0, 0), length
+// 0.501. Nothing in that frame used 11/11/10 at all.
+//
+// Getting this wrong was not a subtle shading error: with neither branch able
+// to decode 2_10_10_10, the pass-through ran asfloat() over a small integer --
+// a denormal indistinguishable from zero -- so every lit surface in the game
+// was shaded with a zero normal.
 float4 tfetchR11G11B10(uint4 value)
 {
     if (g_SpecConstants() & SPEC_CONSTANT_R11G11B10_NORMAL)
     {
-        return float4(
-            (value.x & 0x00000400 ? -1.0 : 0.0) + ((value.x & 0x3FF) / 1024.0),
-            (value.x & 0x00200000 ? -1.0 : 0.0) + (((value.x >> 11) & 0x3FF) / 1024.0),
-            (value.x & 0x80000000 ? -1.0 : 0.0) + (((value.x >> 22) & 0x1FF) / 512.0),
-            0.0);
+        int3 packed = int3(value.x, value.x >> 10, value.x >> 20) & 0x3FF;
+        // Two's complement over 10 bits, normalised by the positive maximum.
+        int3 signed10 = packed - ((packed & 0x200) << 1);
+        return float4(signed10 / 511.0, 0.0);
     }
     else
     {
