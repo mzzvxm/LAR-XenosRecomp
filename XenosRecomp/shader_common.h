@@ -273,7 +273,24 @@ float4 tfetchR11G11B10(uint4 value)
         int3 packed = int3(value.x, value.x >> 10, value.x >> 20) & 0x3FF;
         // Two's complement over 10 bits, normalised by the positive maximum.
         int3 signed10 = packed - ((packed & 0x200) << 1);
-        return float4(signed10 / 511.0, 0.0);
+        // The 2-bit W is NOT unused, whatever an earlier comment here claimed:
+        // for a TANGENT it carries the binormal handedness, and a shader that
+        // needs a binormal builds it as cross(normal, tangent) * tangent.w.
+        // Returning 0.0 made that product zero for every vertex, and the pixel
+        // shader then normalised a zero-length vector -- rsqrt(0) clamped to
+        // FLT_MAX (note FLT_MIN here is -FLT_MAX, so the clamp does not stop
+        // it), which lands as +-65504 in an fp16 target and reads as black.
+        //
+        // Measured on the driver's head (xCharacter_skin_blendshape_normalmap,
+        // which was solid black): every one of its 685 pixels came out exactly
+        // +-65504, and the two high bits of the tangent take exactly two values
+        // over 400 vertices -- 1 on 263 and 3 on 137, i.e. +1 and -1 in 2-bit
+        // two's complement. Normals in the same buffer carry 0 there, which is
+        // why nothing noticed until a shader read the tangent's.
+        int packedW = int(value.x >> 30) & 0x3;
+        int signedW = packedW - ((packedW & 0x2) << 1);
+        // Normalised by the positive maximum, which for two signed bits is 1.
+        return float4(signed10 / 511.0, float(signedW));
     }
     else
     {
