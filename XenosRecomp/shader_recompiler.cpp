@@ -1663,6 +1663,59 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     out += "};\n\n";
 
     out += "#endif\n";
+    out += "\n";
+    out += "// Xenos applies the source blend factor BEFORE a MIN/MAX blend op. D3D12 and\n";
+    out += "// Vulkan ignore the factors for those ops entirely, so the factor has to be\n";
+    out += "// folded into the shader's own output instead.\n";
+    out += "//\n";
+    out += "// The runtime sets a non-zero mode only when the op is MIN or MAX, the source\n";
+    out += "// factor is not ONE, and the destination factor IS ONE -- the destination term\n";
+    out += "// is not ours to scale, so any other destination factor is left unemulated\n";
+    out += "// rather than emulated wrong. Colour and alpha are independent equations and\n";
+    out += "// carry independent modes. Mode 0 means leave it alone, which is what every\n";
+    out += "// draw that does not hit the case uses, so the cost elsewhere is one uniform\n";
+    out += "// compare.\n";
+    out += "float3 blendPremultRgb(float3 rgb, float alpha)\n";
+    out += "{\n";
+    out += "    switch (g_BlendPremultModeRgb)\n";
+    out += "    {\n";
+    out += "        case 1:  return 0.0;\n";
+    out += "        case 2:  return rgb * rgb;\n";
+    out += "        case 3:  return rgb * (1.0 - rgb);\n";
+    out += "        case 4:  return rgb * alpha;\n";
+    out += "        case 5:  return rgb * (1.0 - alpha);\n";
+    out += "        case 6:  return rgb * g_BlendPremultConstant.rgb;\n";
+    out += "        case 7:  return rgb * (1.0 - g_BlendPremultConstant.rgb);\n";
+    out += "        case 8:  return rgb * g_BlendPremultConstant.a;\n";
+    out += "        case 9:  return rgb * (1.0 - g_BlendPremultConstant.a);\n";
+    out += "        default: return rgb;\n";
+    out += "    }\n";
+    out += "}\n";
+    out += "\n";
+    out += "float blendPremultAlpha(float alpha)\n";
+    out += "{\n";
+    out += "    switch (g_BlendPremultModeA)\n";
+    out += "    {\n";
+    out += "        case 1:  return 0.0;\n";
+    out += "        case 2:  return alpha * alpha;\n";
+    out += "        case 3:  return alpha * (1.0 - alpha);\n";
+    out += "        case 4:  return alpha * alpha;\n";
+    out += "        case 5:  return alpha * (1.0 - alpha);\n";
+    out += "        case 6:  return alpha * g_BlendPremultConstant.a;\n";
+    out += "        case 7:  return alpha * (1.0 - g_BlendPremultConstant.a);\n";
+    out += "        case 8:  return alpha * g_BlendPremultConstant.a;\n";
+    out += "        case 9:  return alpha * (1.0 - g_BlendPremultConstant.a);\n";
+    out += "        default: return alpha;\n";
+    out += "    }\n";
+    out += "}\n";
+    out += "\n";
+    out += "// Applied AFTER the alpha test: the test compares the shader's own alpha, and\n";
+    out += "// pre-multiplying before it would change which pixels are discarded.\n";
+    out += "float4 applyBlendPremult(float4 color)\n";
+    out += "{\n";
+    out += "    return float4(blendPremultRgb(color.rgb, color.a), blendPremultAlpha(color.a));\n";
+    out += "}\n";
+    out += "\n";
 
     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
     {
@@ -2305,6 +2358,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     indent();
                     out += '}';
                 #endif
+
+                    // Xenos applies the source blend factor before a MIN/MAX blend op;
+                    // D3D12 and Vulkan ignore the factors there, so the factor has to
+                    // be folded into the output instead. Emitted after the alpha test on
+                    // purpose: the test compares this shader's own alpha, and scaling it
+                    // first would change which pixels are discarded. Inert -- one uniform
+                    // compare -- unless the runtime sets a mode for the draw.
+                    indent();
+                    out += "\toC0 = applyBlendPremult(oC0);\n";
                 }
                 else
                 {

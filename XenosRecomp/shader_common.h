@@ -38,6 +38,9 @@ struct PushConstants
 #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 516)
 #define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 520)
 #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 528)
+#define g_BlendPremultModeRgb     vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 532)
+#define g_BlendPremultModeA       vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 536)
+#define g_BlendPremultConstant    vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 544, 0x10)
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 
@@ -51,7 +54,10 @@ struct PushConstants
     uint g_Booleans : packoffset(c32.x); \
     uint g_SwappedTexcoords : packoffset(c32.y); \
     float2 g_HalfPixelOffset : packoffset(c32.z); \
-    float g_AlphaThreshold : packoffset(c33.x);
+    float g_AlphaThreshold : packoffset(c33.x); \
+    uint g_BlendPremultModeRgb : packoffset(c33.y); \
+    uint g_BlendPremultModeA : packoffset(c33.z); \
+    float4 g_BlendPremultConstant : packoffset(c34);
 
 uint g_SpecConstants();
 
