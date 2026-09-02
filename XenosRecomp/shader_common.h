@@ -68,6 +68,56 @@ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
 TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
 SamplerState g_SamplerDescriptorHeap[] : register(s0, space3);
 
+// Xenos piecewise-linear gamma -> linear.
+//
+// The texture fetch constant carries a 2-bit sign per component and value 3 is
+// GAMMA: the texture unit de-gammas on read. MCLA flags its albedo 3,3,3,0, so
+// without this every midtone arrives lifted and the final gamma amplifies it.
+//
+// The curve is NOT sRGB. It is the four-segment piecewise-linear approximation
+// the hardware uses (rex/graphics/xenos.cpp, PWLGammaToLinear); against sRGB it
+// differs by up to 69% in the deep darks and ~17.5% on average, so the exact
+// curve is worth the handful of instructions.
+//
+// Which textures are flagged rides in bit 31 of the descriptor index the host
+// writes into the SharedConstants table -- a heap index never reaches 2^31, and
+// carrying it there means the generated tfetch call sites did not have to
+// change. Every helper below masks the bit off before indexing the heap.
+#define TFETCH_GAMMA_BIT 0x80000000u
+#define TFETCH_INDEX(i) ((i) & 0x7FFFFFFFu)
+
+float pwlGammaToLinearScalar(float gamma)
+{
+    gamma = saturate(gamma);
+    float scale, offset;
+    if (gamma >= 96.0 / 255.0)
+    {
+        if (gamma >= 192.0 / 255.0) { scale = 8.0 / 1024.0;  offset = -1024.0; }
+        else                        { scale = 4.0 / 1024.0;  offset = -256.0;  }
+    }
+    else
+    {
+        if (gamma >= 64.0 / 255.0)  { scale = 2.0 / 1024.0;  offset = -64.0;   }
+        else                        { scale = 1.0 / 1024.0;  offset = 0.0;     }
+    }
+    // `linear` is an HLSL interpolation modifier, so the local cannot use it.
+    float lin = gamma * ((255.0 * 1024.0) * scale) + offset;
+    // trunc, not floor, for consistency with the linear-to-gamma direction.
+    lin += trunc(lin * scale);
+    return lin * (1.0 / 1023.0);
+}
+
+// Colour only; alpha stays linear, which is what a 3,3,3,0 sign asks for.
+float4 applyTfetchGamma(float4 value, uint resourceDescriptorIndex)
+{
+    if ((resourceDescriptorIndex & TFETCH_GAMMA_BIT) == 0)
+    {
+        return value;
+    }
+    return float4(pwlGammaToLinearScalar(value.x), pwlGammaToLinearScalar(value.y),
+                  pwlGammaToLinearScalar(value.z), value.w);
+}
+
 uint2 getTexture2DDimensions(Texture2D<float4> texture)
 {
     uint2 dimensions;
@@ -77,8 +127,8 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
 
 float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
 {
-    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)];
+    return applyTfetchGamma(texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture)), resourceDescriptorIndex);
 }
 
 // Explicit LOD / LOD bias / explicit gradient variants.
@@ -93,27 +143,27 @@ float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
 // gradients are in play, which is what SampleBias does.
 float4 tfetch2DLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float lod)
 {
-    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), lod);
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)];
+    return applyTfetchGamma(texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), lod), resourceDescriptorIndex);
 }
 
 float4 tfetch2DBias(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float bias)
 {
-    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return texture.SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), bias);
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)];
+    return applyTfetchGamma(texture.SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), bias), resourceDescriptorIndex);
 }
 
 float4 tfetch2DGrad(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float2 gradientH, float2 gradientV)
 {
-    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return texture.SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), gradientH, gradientV);
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)];
+    return applyTfetchGamma(texture.SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), gradientH, gradientV), resourceDescriptorIndex);
 }
 
 // Xenos getCompTexLOD returns the LOD the hardware would pick for these
 // coordinates, broadcast across the destination components.
 float4 getCompTexLod2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord)
 {
-    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)];
     return texture.CalculateLevelOfDetail(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord).xxxx;
 }
 
@@ -126,7 +176,7 @@ float4 getGradients(float2 texCoord)
 
 float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
 {
-    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)];
     return select(isnan(texCoord), 0.0, frac(texCoord * getTexture2DDimensions(texture) + offset - 0.5));
 }
 
@@ -172,7 +222,7 @@ float h1(float a)
 
 float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
 {
-    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)];
     SamplerState samplerState = g_SamplerDescriptorHeap[samplerDescriptorIndex];
     uint2 dimensions = getTexture2DDimensions(texture);
     
@@ -199,27 +249,27 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
         g1(fy) * (g0x * texture.Sample(samplerState, float2(px + h0x, py + h1y) / float2(dimensions)) +
             g1x * texture.Sample(samplerState, float2(px + h1x, py + h1y) / float2(dimensions)));
 
-    return r;
+    return applyTfetchGamma(r, resourceDescriptorIndex);
 }
 
 float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
 {
-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
+    return g_Texture3DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
 }
 
 float4 tfetch3DLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float lod)
 {
-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, lod);
+    return g_Texture3DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, lod);
 }
 
 float4 tfetch3DBias(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float bias)
 {
-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, bias);
+    return g_Texture3DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, bias);
 }
 
 float4 tfetch3DGrad(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float3 gradientH, float3 gradientV)
 {
-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, gradientH, gradientV);
+    return g_Texture3DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, gradientH, gradientV);
 }
 
 struct CubeMapData
@@ -230,22 +280,22 @@ struct CubeMapData
 
 float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
 {
-    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
+    return g_TextureCubeDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
 }
 
 float4 tfetchCubeLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float lod)
 {
-    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], lod);
+    return g_TextureCubeDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], lod);
 }
 
 float4 tfetchCubeBias(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float bias)
 {
-    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], bias);
+    return g_TextureCubeDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], bias);
 }
 
 float4 tfetchCubeGrad(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float3 gradientH, float3 gradientV)
 {
-    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], gradientH, gradientV);
+    return g_TextureCubeDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)].SampleGrad(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], gradientH, gradientV);
 }
 
 // Packed normal/tangent/binormal unpack.
@@ -329,7 +379,7 @@ float4 max4(float4 src0)
 
 float2 getPixelCoord(uint resourceDescriptorIndex, float2 texCoord)
 {
-    return getTexture2DDimensions(g_Texture2DDescriptorHeap[resourceDescriptorIndex]) * texCoord;
+    return getTexture2DDimensions(g_Texture2DDescriptorHeap[TFETCH_INDEX(resourceDescriptorIndex)]) * texCoord;
 }
 
 float computeMipLevel(float2 pixelCoord)
