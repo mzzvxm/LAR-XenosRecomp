@@ -1782,8 +1782,26 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     {
         out += "\tin float4 iPos : SV_Position,\n";
 
+        // CENTROID. Without it D3D12 interpolates at the pixel CENTRE, which in a
+        // partially covered pixel can lie OUTSIDE the triangle -- the attributes
+        // are then extrapolated. 402 of MCLA's 1006 translated pixel shaders
+        // divide by an interpolant (`clamp(rcp(...), FLT_MIN, FLT_MAX)`, this
+        // translator's own rendering of the Xenos RECP), so an extrapolated value
+        // near zero becomes millions.
+        //
+        // Measured in three RenderDoc captures of the game with 4x MSAA: ONE
+        // sample of ONE texel gets a colossal value (-2007160, +47461 and -2040
+        // seen) while its neighbours are fine. The MSAA resolve averages it in,
+        // the post-process downsample spreads it over a 2x2 texel block at
+        // 640x360, and the tonemap turns that into a 4x4 black (clamped) or white
+        // (saturated) block on screen -- transient, anywhere, unreproducible.
+        //
+        // Centroid samples inside the covered area, which is what the modifier is
+        // for. It changes nothing for a fully covered pixel, and with a single
+        // sample centroid and centre ARE the same point, so it is a no-op when
+        // MSAA is off.
         for (auto& [usage, usageIndex] : INTERPOLATORS)
-            println("\tin float4 i{0}{1} : {2}{1},", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
+            println("\tin centroid float4 i{0}{1} : {2}{1},", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
 
         out += "#ifdef __spirv__\n";
         out += "\tin bool iFace : SV_IsFrontFace\n";
