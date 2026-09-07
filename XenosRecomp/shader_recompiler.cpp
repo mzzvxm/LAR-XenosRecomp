@@ -651,8 +651,41 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
                         else
                     #endif
                         {
+                            // WHICH of the two relative bits belongs to THIS
+                            // operand. The encoding has const0Relative and
+                            // const1Relative, and the slot is decided by how many
+                            // CONSTANT sources the instruction has -- slot 0 is the
+                            // first constant operand, slot 1 the second -- NOT by the
+                            // source index. `select` is false for a constant source
+                            // and true for a temp register, so src1 being a constant
+                            // is what pushes a src2 constant into slot 1.
+                            //
+                            // Reading const0Relative for everything is what made
+                            // xRimMain__VS_Common emit
+                            //   oTexCoord4.xy = tintColors(0 + a0).xy;                 // max: src1 == src2, one constant  -> slot 0
+                            //   oTexCoord4.zw = select(..., tintColors(0).zz, ...);    // cnd: src1 is c255, ALSO a constant -> tintColors is slot 1
+                            // and the second line lost its a0. The wheel picks its
+                            // paint slot with a0 = trunc(TEXCOORD0.z), so losing it
+                            // takes the BLUE channel from tint slot 0 while red and
+                            // green come from the part's own slot: a black rim
+                            // rendered (0.0066, 0.0066, 0.9574), pure blue.
+                            //
+                            // Do NOT simplify this to "src2 always uses
+                            // const1Relative". Tried 2026-09-07: 54 reads gained a
+                            // relative index and 2234 LOST one -- every
+                            // `gCarMtxBuffer(N + a0)` and `gLightMatrixArr(N + a0)`
+                            // collapsed to index 0, because there src1 is a TEMP and
+                            // the constant at src2 is the FIRST constant, slot 0.
+                            //
+                            // src3 (the scalar constant sources) is left on slot 0,
+                            // which is what this always did: no case has been measured
+                            // for it and guessing would change shaders nothing has
+                            // shown to be wrong.
+                            const bool secondConstant = (operand == VECTOR_1) && !instr.src1Select;
+                            const bool relative = secondConstant ? instr.const1Relative
+                                                                 : instr.const0Relative;
                             regFormatted = fmt::format("{}({}{})", constantName,
-                                reg - findResult->second->registerIndex, instr.const0Relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
+                                reg - findResult->second->registerIndex, relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
                         }
                     }
                     else
