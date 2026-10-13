@@ -21,6 +21,15 @@ struct StringBuffer
     }
 };
 
+// How the control flow program of a shader was translated; see planControlFlow
+// in shader_recompiler.cpp.
+enum class ControlFlowForm
+{
+    Flat,       // no jumps
+    Structured, // jumps expressed as if / if-else statements
+    PcMachine   // a switch over the control flow index inside a loop
+};
+
 struct ShaderRecompiler : StringBuffer
 {
     uint32_t indentation = 0;
@@ -31,8 +40,8 @@ struct ShaderRecompiler : StringBuffer
     std::unordered_map<uint32_t, const ConstantInfo*> float4Constants;
     std::unordered_map<uint32_t, const char*> boolConstants;
     std::unordered_map<uint32_t, const char*> samplers;
-    std::unordered_map<uint32_t, uint32_t> ifEndLabels;
     uint32_t specConstantsMask = 0;
+    ControlFlowForm controlFlowForm = ControlFlowForm::Flat;
 
     // Set by a pre-pass over the control flow when the shader actually issues
     // setTexLOD / setGradientsHorz / setGradientsVert. Shaders that never touch

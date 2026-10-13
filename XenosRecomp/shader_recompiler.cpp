@@ -1367,6 +1367,206 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
     }
 }
 
+// The Xenos control flow program is a list of instructions addressed by index,
+// with jumps between them. HLSL has no goto, so the jumps become statements:
+//
+//   - a conditional jump forward over a block of instructions is
+//         if (the jump is not taken) { block }
+//   - when that block ends in an unconditional jump forward over a second
+//     block, the pair is
+//         if (the jump is not taken) { block } else { second block }
+//
+// as long as every block nests inside the blocks and loops around it. That is
+// the structured form. A program with any other jump -- backward, into another
+// block, an unconditional one that does not end a then-block -- becomes a
+// switch over the control flow index inside an endless loop instead (the pc
+// machine). Both are correct for DXC, but vkd3d-proton's dxil-spirv rejects the
+// pc machine's DXIL as an infinite loop and the driver crashes on the result,
+// so the structured form is the one to produce wherever it exists. Measured
+// across Midnight Club's 2333 shaders: 77 conditional jumps, all predicated
+// and forward, and 50 unconditional ones, all forward, each ending the
+// then-block of an if-else (41 *MultiLightInterior pixel shaders and 9 particle
+// vertex shaders); no backward jump, no bool-constant jump, no call. The
+// structured form of the 41 pixel shaders compiles to the same DXIL, byte for
+// byte, as the if/else rewrite they were given by hand for dxil-spirv.
+struct ControlFlowPlan
+{
+    ControlFlowForm form = ControlFlowForm::Flat;
+
+    enum class BlockAction : uint8_t
+    {
+        Close,             // }
+        CloseThenOpenElse  // } else {
+    };
+
+    // Per control flow index, plus one entry for the end of the program: what
+    // to emit before that instruction, innermost block first.
+    std::vector<std::vector<BlockAction>> blockActionsBefore;
+
+    // Per control flow index: the unconditional jump that ends a then-block. It
+    // is the "else" of the statement, so nothing else is emitted for it.
+    std::vector<bool> isElseJump;
+
+    // Set when the program uses control flow this translator does not
+    // implement in either form.
+    std::string error;
+};
+
+static ControlFlowPlan planControlFlow(const std::vector<ControlFlowInstruction>& controlFlow)
+{
+    const uint32_t size = uint32_t(controlFlow.size());
+
+    ControlFlowPlan plan;
+    plan.blockActionsBefore.resize(size + 1);
+    plan.isElseJump.resize(size);
+
+    enum class BlockKind
+    {
+        If,
+        Else,
+        Loop
+    };
+
+    struct Block
+    {
+        BlockKind kind;
+        uint32_t end;     // index the block closes at; for a loop, its LoopEnd
+        uint32_t elseEnd; // an if that has an else-block: where that one closes
+    };
+
+    std::vector<Block> open;
+    bool hasJumps = false;
+    bool structured = true;
+
+    // A block opened inside the first `depth` open blocks must close no later
+    // than the innermost of them.
+    auto enclosingEnd = [&](size_t depth)
+    {
+        return depth == 0 ? size : open[depth - 1].end;
+    };
+
+    for (uint32_t index = 0; index <= size && structured; index++)
+    {
+        while (!open.empty() && open.back().kind != BlockKind::Loop && open.back().end == index)
+        {
+            Block& block = open.back();
+            if (block.kind == BlockKind::If && block.elseEnd != 0)
+            {
+                plan.blockActionsBefore[index].push_back(ControlFlowPlan::BlockAction::CloseThenOpenElse);
+                block.kind = BlockKind::Else;
+                block.end = block.elseEnd;
+                block.elseEnd = 0;
+            }
+            else
+            {
+                plan.blockActionsBefore[index].push_back(ControlFlowPlan::BlockAction::Close);
+                open.pop_back();
+            }
+        }
+
+        // A block that should close here but is not the innermost one overlaps
+        // another block instead of nesting in it.
+        for (const Block& block : open)
+        {
+            if (block.kind != BlockKind::Loop && block.end <= index)
+                structured = false;
+        }
+
+        if (index == size || !structured)
+            break;
+
+        const ControlFlowInstruction& cfInstr = controlFlow[index];
+        switch (cfInstr.opcode)
+        {
+        case ControlFlowOpcode::CondJmp:
+        {
+            hasJumps = true;
+            const uint32_t target = cfInstr.condJmp.address;
+
+            if (cfInstr.condJmp.direction || target <= index || target > size)
+            {
+                structured = false;
+            }
+            else if (cfInstr.condJmp.isUnconditional)
+            {
+                // Only as the last instruction of an if's then-block, jumping over
+                // an else-block that still nests in whatever encloses the if.
+                if (!open.empty() && open.back().kind == BlockKind::If && open.back().elseEnd == 0 &&
+                    open.back().end == index + 1 && target <= enclosingEnd(open.size() - 1))
+                {
+                    open.back().elseEnd = target;
+                    plan.isElseJump[index] = true;
+                }
+                else
+                {
+                    structured = false;
+                }
+            }
+            else if (target <= enclosingEnd(open.size()))
+            {
+                open.push_back({ BlockKind::If, target, 0 });
+            }
+            else
+            {
+                structured = false;
+            }
+            break;
+        }
+
+        case ControlFlowOpcode::LoopStart:
+        {
+            // The body runs from the next instruction to the LoopEnd, which sits
+            // right before the LoopStart's exit address and jumps back to the
+            // instruction after the LoopStart.
+            const uint32_t exit = cfInstr.loopStart.address;
+            if (exit < index + 2 || exit > enclosingEnd(open.size()) ||
+                controlFlow[exit - 1].opcode != ControlFlowOpcode::LoopEnd ||
+                controlFlow[exit - 1].loopEnd.address != index + 1 ||
+                controlFlow[exit - 1].loopEnd.loopId != cfInstr.loopStart.loopId)
+            {
+                structured = false;
+            }
+            else
+            {
+                open.push_back({ BlockKind::Loop, exit - 1, 0 });
+            }
+            break;
+        }
+
+        case ControlFlowOpcode::LoopEnd:
+            if (open.empty() || open.back().kind != BlockKind::Loop || open.back().end != index)
+                structured = false;
+            else
+                open.pop_back();
+            break;
+
+        case ControlFlowOpcode::CondCall:
+        case ControlFlowOpcode::Return:
+            plan.error = fmt::format("control flow call/return at {}", index);
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    if (!open.empty())
+        structured = false;
+
+    if (!structured)
+    {
+        plan.form = ControlFlowForm::PcMachine;
+        plan.blockActionsBefore.assign(size + 1, {});
+        plan.isElseJump.assign(size, false);
+    }
+    else
+    {
+        plan.form = hasJumps ? ControlFlowForm::Structured : ControlFlowForm::Flat;
+    }
+
+    return plan;
+}
+
 void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_view& include)
 {
     const auto shaderContainer = reinterpret_cast<const ShaderContainer*>(shaderData);
@@ -1905,6 +2105,17 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     }
 #endif
 
+    // Loop constants the shader defines itself (the i{N} literals below), by
+    // index: count, start and step of the loop. Only these are known when the
+    // shader is translated; see the LoopStart emission.
+    struct LoopConstant
+    {
+        int count;
+        int start;
+        int step;
+    };
+    std::unordered_map<uint32_t, LoopConstant> definedLoopConstants;
+
     if (shaderContainer->definitionTableOffset != NULL)
     {
         auto definitionTable = reinterpret_cast<const DefinitionTable*>(shaderData + shaderContainer->definitionTableOffset);
@@ -1944,6 +2155,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
                 println("\tint4 i{} = int4({}, {}, {}, {});",
                     (definition->registerIndex - 8992) / 4 + i, x, y, z, w);
+
+                definedLoopConstants.emplace((definition->registerIndex - 8992) / 4 + i, LoopConstant{ x, y, z });
             }
             definitions += 2;
             definitions += definition->count;
@@ -2052,7 +2265,6 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     auto controlFlowCode = code;
     uint32_t instrAddress = 0;
     uint32_t instrSize = shader->size;
-    bool simpleControlFlow = true;
 
     while (instrAddress < instrSize)
     {
@@ -2087,16 +2299,6 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 address = cfInstr.condExecPred.address;
                 isExecBlock = true;
                 break;
-
-            case ControlFlowOpcode::CondJmp:
-            {
-                if (cfInstr.condJmp.isUnconditional || cfInstr.condJmp.direction)
-                    simpleControlFlow = false;
-                else
-                    ++ifEndLabels[cfInstr.condJmp.address];
-
-                break;
-            }
             }
 
             if (address != 0)
@@ -2143,7 +2345,31 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         out += "\tfloat3 tfetchGradientV = 0.0;\n";
     }
 
-    if (simpleControlFlow)
+    std::vector<ControlFlowInstruction> controlFlowList;
+    controlFlowCode = code;
+    for (instrAddress = 0; instrAddress < instrSize; instrAddress += 12)
+    {
+        code0 = controlFlowCode[0];
+        code1 = controlFlowCode[1] & 0xFFFF;
+        code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
+        code3 = controlFlowCode[2] >> 16;
+
+        controlFlowList.push_back(controlFlow[0]);
+        controlFlowList.push_back(controlFlow[1]);
+        controlFlowCode += 3;
+    }
+
+    const ControlFlowPlan controlFlowPlan = planControlFlow(controlFlowList);
+    controlFlowForm = controlFlowPlan.form;
+    const bool pcMachine = (controlFlowPlan.form == ControlFlowForm::PcMachine);
+
+    // A program this translator cannot express stops the shader at compile
+    // time with the reason, instead of shipping code that does something else
+    // than the hardware.
+    if (!controlFlowPlan.error.empty())
+        println("#error XenosRecomp: {}", controlFlowPlan.error);
+
+    if (!pcMachine)
     {
         out += '\n';
         indentation = 1;
@@ -2156,6 +2382,27 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         out += "\t\tswitch (pc)\n";
         out += "\t\t{\n";
     }
+
+    // The blocks the structured form closes before the instruction at an
+    // index, innermost first; see planControlFlow.
+    auto closeBlocks = [&](uint32_t index)
+    {
+        for (ControlFlowPlan::BlockAction action : controlFlowPlan.blockActionsBefore[index])
+        {
+            --indentation;
+            indent();
+            out += "}\n";
+
+            if (action == ControlFlowPlan::BlockAction::CloseThenOpenElse)
+            {
+                indent();
+                out += "else\n";
+                indent();
+                out += "{\n";
+                ++indentation;
+            }
+        }
+    };
 
     controlFlowCode = code;
     instrAddress = 0;
@@ -2170,32 +2417,23 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
         for (auto& cfInstr : controlFlow)
         {
-            if (!simpleControlFlow)
+            if (pcMachine)
             {
                 indentation = 3;
                 println("\t\tcase {}:", pc);
             }
             else
             {
-                auto findResult = ifEndLabels.find(pc);
-                if (findResult != ifEndLabels.end())
-                {
-                    for (uint32_t i = 0; i < findResult->second; i++)
-                    {
-                        --indentation;
-                        indent();
-                        out += "}\n";
-                    }
-                }
+                closeBlocks(pc);
             }
 
+            const bool isElseJump = controlFlowPlan.isElseJump[pc];
             ++pc;
 
             uint32_t address = 0;
             uint32_t count = 0;
             uint32_t sequence = 0;
             bool shouldReturn = false;
-            bool shouldCloseCurlyBracket = false;
 
             switch (cfInstr.opcode)
             {
@@ -2214,7 +2452,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 address = cfInstr.condExec.address;
                 count = cfInstr.condExec.count;
                 sequence = cfInstr.condExec.sequence;
-                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
+                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
                 break;
 
             case ControlFlowOpcode::CondExecPred:
@@ -2226,7 +2464,21 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 break;
 
             case ControlFlowOpcode::LoopStart:
-                if (simpleControlFlow)
+            {
+                // Both forms count aL from 0 in steps of 1 up to the loop count,
+                // which is the hardware's loop only for a constant whose start is 0
+                // and step is 1, and they read the count from the i{N} literal the
+                // shader defines. A loop that is not like that has to fail.
+                auto loopConstant = definedLoopConstants.find(cfInstr.loopStart.loopId);
+                if (loopConstant == definedLoopConstants.end())
+                    println("#error XenosRecomp: loop over runtime loop constant i{}", uint32_t(cfInstr.loopStart.loopId));
+                else if (loopConstant->second.start != 0 || loopConstant->second.step != 1)
+                    println("#error XenosRecomp: loop constant i{} starts at {} with step {}", uint32_t(cfInstr.loopStart.loopId),
+                        loopConstant->second.start, loopConstant->second.step);
+                if (cfInstr.loopStart.isRepeat)
+                    println("#error XenosRecomp: repeat loop (iterator kept across LoopStart) at {}", pc - 1);
+
+                if (!pcMachine)
                 {
                     indent();
                 #ifdef UNLEASHED_RECOMP
@@ -2237,14 +2489,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     out += "{\n";
                     ++indentation;
                 }
-                else 
+                else
                 {
                     out += "\t\t\taL = 0;\n";
+                    // A loop count of 0 skips the body, as the for statement does.
+                    println("\t\t\tif (aL >= i{}.x)", uint32_t(cfInstr.loopStart.loopId));
+                    out += "\t\t\t{\n";
+                    println("\t\t\t\tpc = {};", uint32_t(cfInstr.loopStart.address));
+                    out += "\t\t\t\tcontinue;\n";
+                    out += "\t\t\t}\n";
                 }
                 break;
+            }
 
             case ControlFlowOpcode::LoopEnd:
-                if (simpleControlFlow)
+                if (cfInstr.loopEnd.isPredicatedBreak)
+                    println("#error XenosRecomp: predicated loop break at {}", pc - 1);
+
+                if (!pcMachine)
                 {
                     --indentation;
                     indent();
@@ -2263,29 +2525,38 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             case ControlFlowOpcode::CondJmp:
             {
-                if (cfInstr.condJmp.isUnconditional)
+                if (isElseJump)
                 {
-                    assert(!simpleControlFlow);
+                    // The end of an if's then-block: the "else" closeBlocks opens
+                    // at the jump's target is this jump.
+                }
+                else if (cfInstr.condJmp.isUnconditional)
+                {
+                    assert(pcMachine);
                     println("\t\t\tpc = {};", uint32_t(cfInstr.condJmp.address));
                     out += "\t\t\tcontinue;\n";
                 }
                 else
                 {
+                    // Structured, the block runs when the jump is NOT taken; the pc
+                    // machine tests for the jump itself.
+                    const bool skipsBlock = !pcMachine;
+
                     indent();
                     if (cfInstr.condJmp.isPredicated)
                     {
-                        println("if ({}p0)", cfInstr.condJmp.condition ^ simpleControlFlow ? "" : "!");
+                        println("if ({}p0)", (cfInstr.condJmp.condition ^ skipsBlock) ? "" : "!");
                     }
                     else
                     {
                         auto findResult = boolConstants.find(cfInstr.condJmp.boolAddress);
                         if (findResult != boolConstants.end())
-                            println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+                            println("if ((g_Booleans & {}) {}= 0)", findResult->second, (cfInstr.condJmp.condition ^ skipsBlock) ? "!" : "=");
                         else
-                            println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+                            println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), (cfInstr.condJmp.condition ^ skipsBlock) ? "!" : "=");
                     }
 
-                    if (simpleControlFlow)
+                    if (!pcMachine)
                     {
                         indent();
                         out += "{\n";
@@ -2303,8 +2574,127 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             }
             }
 
+            // Conditional execution. The hardware tests the block's condition once,
+            // before the block, and skips all of it -- including the end of the
+            // program, for the End variants -- when the test fails. In a predicated
+            // exec the compiler predicates the instructions too, because the
+            // hardware enters the block when ANY of its 64 invocations passes, so
+            // the block's own test is usually redundant (see below). The
+            // bool-constant form is not: it guards enableVertDamage in 28 car
+            // vertex shaders, which the game draws with the bool both set and clear
+            // in one frame, and without the test both sides of it ran.
+            bool isConditionalBlock = false;
+            switch (cfInstr.opcode)
+            {
+            case ControlFlowOpcode::CondExec:
+            case ControlFlowOpcode::CondExecEnd:
+            case ControlFlowOpcode::CondExecPredClean:
+            case ControlFlowOpcode::CondExecPredCleanEnd:
+            {
+                // The constant table numbers a pixel shader's bools from 0 like a
+                // vertex shader's; where they sit in the bool address space this
+                // test reads is not established, and no Midnight Club pixel shader
+                // has the case.
+                auto findResult = boolConstants.find(cfInstr.condExec.boolAddress);
+                if (isPixelShader || findResult == boolConstants.end())
+                {
+                    println("#error XenosRecomp: exec conditioned on bool constant {} in a {} shader", uint32_t(cfInstr.condExec.boolAddress),
+                        isPixelShader ? "pixel" : "vertex (not in the constant table)");
+                }
+                else
+                {
+                    indent();
+                    println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condExec.condition ? "!" : "=");
+                    isConditionalBlock = true;
+                }
+                break;
+            }
+
+            case ControlFlowOpcode::CondExecPred:
+            case ControlFlowOpcode::CondExecPredEnd:
+            {
+                // When every instruction of the block is predicated on the block's
+                // own condition and the block does not end the program, the test is
+                // redundant and is left out: if p0 fails it at entry, the first
+                // instruction is skipped, so it cannot change p0, and neither can
+                // any after it. The ALU no-op (max with no write mask and no export,
+                // scalar retain_prev) changes nothing and does not count. That covers
+                // all 1219 of Midnight Club's predicated blocks -- the 9 that hold an
+                // unpredicated instruction hold exactly that no-op -- so the test is
+                // emitted for none of them; it exists for the shaders where it is not
+                // redundant.
+                bool everyInstructionPredicated = true;
+                uint32_t blockSequence = cfInstr.condExecPred.sequence;
+                for (uint32_t i = 0; i < count; i++, blockSequence >>= 2)
+                {
+                    union
+                    {
+                        VertexFetchInstruction vertexFetch;
+                        TextureFetchInstruction textureFetch;
+                        AluInstruction alu;
+                        struct
+                        {
+                            uint32_t code0;
+                            uint32_t code1;
+                            uint32_t code2;
+                        };
+                    };
+
+                    const be<uint32_t>* blockCode = code + (address + i) * 3;
+                    code0 = blockCode[0];
+                    code1 = blockCode[1];
+                    code2 = blockCode[2];
+
+                    bool isPredicated;
+                    uint32_t predicateCondition;
+                    if ((blockSequence & 0x1) == 0)
+                    {
+                        if (alu.vectorWriteMask == 0 && alu.scalarWriteMask == 0 && !alu.exportData &&
+                            alu.vectorOpcode == AluVectorOpcode::Max && alu.scalarOpcode == AluScalarOpcode::RetainPrev)
+                        {
+                            continue;
+                        }
+
+                        isPredicated = alu.isPredicated;
+                        predicateCondition = alu.predicateCondition;
+                    }
+                    else if (vertexFetch.opcode == FetchOpcode::VertexFetch)
+                    {
+                        isPredicated = vertexFetch.isPredicated;
+                        predicateCondition = vertexFetch.predicateCondition;
+                    }
+                    else
+                    {
+                        isPredicated = textureFetch.isPredicated;
+                        predicateCondition = textureFetch.predCondition;
+                    }
+
+                    if (!isPredicated || predicateCondition != cfInstr.condExecPred.condition)
+                        everyInstructionPredicated = false;
+                }
+
+                if (shouldReturn || !everyInstructionPredicated)
+                {
+                    indent();
+                    println("if ({}p0)", cfInstr.condExecPred.condition ? "" : "!");
+                    isConditionalBlock = true;
+                }
+                break;
+            }
+
+            default:
+                break;
+            }
+
+            if (isConditionalBlock)
+            {
+                indent();
+                out += "{\n";
+                ++indentation;
+            }
+
             auto instructionCode = code + address * 3;
-            
+
             for (uint32_t i = 0; i < count; i++)
             {
                 union
@@ -2429,7 +2819,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     }
                 }
 
-                if (simpleControlFlow)
+                if (!pcMachine)
                 {
                     indent();
                 #ifdef UNLEASHED_RECOMP
@@ -2449,7 +2839,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 }
             }
 
-            if (shouldCloseCurlyBracket)
+            if (isConditionalBlock)
             {
                 --indentation;
                 indent();
@@ -2461,7 +2851,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         instrAddress += 12;
     }
 
-    if (!simpleControlFlow)
+    if (!pcMachine)
+    {
+        // Blocks whose jump targets the end of the program.
+        closeBlocks(pc);
+    }
+    else
     {
         out += "\t\t\tbreak;\n";
         out += "\t\t}\n";

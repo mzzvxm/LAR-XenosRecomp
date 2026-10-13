@@ -41,6 +41,9 @@ struct PushConstants
 #define g_BlendPremultModeRgb     vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 532)
 #define g_BlendPremultModeA       vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 536)
 #define g_BlendPremultConstant    vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 544, 0x10)
+// Vertex shader position epilogue; see the note after these definitions.
+#define g_PosScale               vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 560, 0x10)
+#define g_PosOffset               vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 576, 0x10)
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 

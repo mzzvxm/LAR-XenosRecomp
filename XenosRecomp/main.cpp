@@ -143,6 +143,7 @@ struct HlslShader
     std::string hlsl;
     uint32_t specConstantsMask = 0;
     bool isPixelShader = false;
+    ControlFlowForm controlFlowForm = ControlFlowForm::Flat;
     bool recompiled = false;
     bool dxilOk = false;
     bool spirvOk = false;
@@ -254,6 +255,7 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
             shader.hlsl = recompiler.out;
             shader.specConstantsMask = recompiler.specConstantsMask;
             shader.isPixelShader = recompiler.isPixelShader;
+            shader.controlFlowForm = recompiler.controlFlowForm;
             shader.recompiled = !shader.hlsl.empty();
 
             writeAllBytes(shader.outputPath.c_str(), shader.hlsl.data(), shader.hlsl.size());
@@ -280,9 +282,13 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
     size_t dxilFailures = 0;
     size_t spirvFailures = 0;
     size_t vertexShaders = 0;
+    size_t controlFlowForms[3] = {};
+    std::vector<std::string> pcMachineShaders;
+
+    static constexpr const char* CONTROL_FLOW_FORM_NAMES[] = { "flat", "structured", "pc_machine" };
 
     StringBuffer report;
-    report.println("source_file\tcategory\tgroup\tentry_point\thash\tstage\tspec_constants\thlsl\tdxil\tspirv");
+    report.println("source_file\tcategory\tgroup\tentry_point\thash\tstage\tspec_constants\thlsl\tdxil\tspirv\tcontrol_flow");
 
     StringBuffer errors;
 
@@ -295,7 +301,11 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
         if (!shader.spirvOk)
             ++spirvFailures;
 
-        report.println("{}\t{}\t{}\t{}\t{:016X}\t{}\t0x{:X}\t{}\t{}\t{}",
+        ++controlFlowForms[uint32_t(shader.controlFlowForm)];
+        if (shader.controlFlowForm == ControlFlowForm::PcMachine)
+            pcMachineShaders.push_back(std::filesystem::relative(shader.outputPath, outputRoot).generic_string());
+
+        report.println("{}\t{}\t{}\t{}\t{:016X}\t{}\t0x{:X}\t{}\t{}\t{}\t{}",
             shader.sourceFile,
             shader.category,
             shader.name.valid ? shader.name.group : std::string("?"),
@@ -305,7 +315,8 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
             shader.specConstantsMask,
             std::filesystem::relative(shader.outputPath, outputRoot).generic_string(),
             shader.dxilOk ? "ok" : "FAIL",
-            shader.spirvOk ? "ok" : "FAIL");
+            shader.spirvOk ? "ok" : "FAIL",
+            CONTROL_FLOW_FORM_NAMES[uint32_t(shader.controlFlowForm)]);
 
         if (!shader.dxilOk || !shader.spirvOk)
         {
@@ -331,6 +342,15 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
     fmt::println("HLSL emitted        : {}", shaders.size());
     fmt::println("DXIL compiled       : {} ({} failed)", shaders.size() - dxilFailures, dxilFailures);
     fmt::println("SPIR-V compiled     : {} ({} failed)", shaders.size() - spirvFailures, spirvFailures);
+    fmt::println("Control flow        : {} flat, {} structured, {} pc machine",
+        controlFlowForms[0], controlFlowForms[1], controlFlowForms[2]);
+
+    // The pc machine is correct for DXC but crashes vkd3d-proton (see
+    // planControlFlow in shader_recompiler.cpp), so every shader that needs it
+    // is named.
+    std::sort(pcMachineShaders.begin(), pcMachineShaders.end());
+    for (auto& name : pcMachineShaders)
+        fmt::println("  pc machine        : {}", name);
     fmt::println("Report              : {}", reportPath);
     fmt::println("Errors              : {}", errorsPath);
 
