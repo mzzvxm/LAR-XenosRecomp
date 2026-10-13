@@ -1950,6 +1950,49 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     out += "}\n";
     out += "\n";
 
+#ifndef UNLEASHED_RECOMP
+    // Xenia's alpha to mask (DxbcShaderTranslator::CompletePixelShader_AlphaToMask,
+    // BSD-3-Clause): each sample is covered when the shader's alpha -- before the
+    // exponent bias, which the hardware applies after this test -- reaches its
+    // threshold, lowered by a 2-bit dither offset chosen by the pixel's position
+    // parity from RB_COLORCONTROL's alpha_to_mask_offset0..3. The host's own alpha
+    // to coverage would test the biased alpha, so it is never enabled. Called by
+    // the XENOS_ALPHA_COVERAGE variant only (shader_common.h).
+    // g_AlphaToMask: bits 0-7 the four offsets, bit 8 enabled, bits 9-10 the
+    // sample count log2. 2x: the guest's sample 0 (top) is the host's sample 1.
+    out += "uint computeAlphaToMask(float alpha, float2 pixelPosition)\n";
+    out += "{\n";
+    out += "    uint params = g_AlphaToMask;\n";
+    out += "    if ((params & 0x100u) == 0u)\n";
+    out += "        return 0xFFFFFFFFu;\n";
+    out += "    uint2 p = uint2(pixelPosition);\n";
+    out += "    uint index = ((p.x & 1u) << 1) | (p.y & 1u);\n";
+    out += "    float offset = float((params >> (index * 2u)) & 3u);\n";
+    out += "    uint samplesLog2 = (params >> 9) & 3u;\n";
+    out += "    uint coverage = 0u;\n";
+    out += "    if (samplesLog2 == 2u)\n";
+    out += "    {\n";
+    out += "        float step = offset * (1.0 / 16.0);\n";
+    out += "        coverage |= (alpha >= 0.75 - step) ? 1u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.25 - step) ? 2u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.5 - step) ? 4u : 0u;\n";
+    out += "        coverage |= (alpha >= 1.0 - step) ? 8u : 0u;\n";
+    out += "    }\n";
+    out += "    else if (samplesLog2 == 1u)\n";
+    out += "    {\n";
+    out += "        float step = offset * (1.0 / 8.0);\n";
+    out += "        coverage |= (alpha >= 0.5 - step) ? 2u : 0u;\n";
+    out += "        coverage |= (alpha >= 1.0 - step) ? 1u : 0u;\n";
+    out += "    }\n";
+    out += "    else\n";
+    out += "    {\n";
+    out += "        coverage = (alpha >= 1.0 - offset * (1.0 / 4.0)) ? 1u : 0u;\n";
+    out += "    }\n";
+    out += "    return coverage;\n";
+    out += "}\n";
+    out += "\n";
+#endif
+
     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
     {
         const auto constantInfo = reinterpret_cast<const ConstantInfo*>(
@@ -2011,7 +2054,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
         auto pixelShader = reinterpret_cast<const PixelShader*>(shader);
         if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
+        {
             out += ",\n\tout float4 oC0 : SV_Target0";
+        #ifndef UNLEASHED_RECOMP
+            // Alpha to coverage is the shader's (computeAlphaToMask), in the
+            // variant whose coverage depends on alpha only: an SV_Coverage output
+            // (or a discard) in every variant would cost every draw the host's
+            // early depth/stencil test.
+            out += "\n#if XENOS_ALPHA_COVERAGE\n\t, out uint oCoverage : SV_Coverage\n#endif\n";
+        #endif
+        }
         if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR1)
             out += ",\n\tout float4 oC1 : SV_Target1";
         if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR2)
@@ -2780,6 +2832,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     indent();
                     out += "\tclip(oC0.w - g_AlphaThreshold);\n";
 
+                #ifndef UNLEASHED_RECOMP
+                    // Alpha to coverage after the alpha test and before the exponent
+                    // bias (in applyBlendPremult), as the hardware orders them; no
+                    // covered sample = nothing written. The runtime runs this
+                    // variant for the alpha test, alpha to coverage or both: a
+                    // threshold of -infinity discards nothing, g_AlphaToMask 0
+                    // covers every sample.
+                    if (reinterpret_cast<const PixelShader*>(shader)->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
+                    {
+                        out += "#if XENOS_ALPHA_COVERAGE\n";
+                        indent();
+                        out += "\toCoverage = computeAlphaToMask(oC0.w, iPos.xy);\n";
+                        indent();
+                        out += "\tif (oCoverage == 0u) discard;\n";
+                        out += "#endif\n";
+                    }
+                #endif
+
                     indent();
                     out += "}";
 
@@ -2813,10 +2883,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 {
                 #ifdef UNLEASHED_RECOMP
                     if (!hasMtxProjection)
-                #endif
                     {
                         out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
                     }
+                #else
+                    // Xenos clip space to the host's; see g_PosScale in
+                    // shader_common.h.
+                    indent();
+                    out += "oPos.xyz = oPos.xyz * g_PosScale.xyz + g_PosOffset.xyz * oPos.w;\n";
+                #endif
                 }
 
                 if (!pcMachine)

@@ -15,6 +15,25 @@
 #define FLT_MIN asfloat(0xff7fffff)
 #define FLT_MAX asfloat(0x7f7fffff)
 
+// LAR builds compile every spec variant with its spec constants fixed:
+// -D XENOS_SPEC_CONSTANTS=<value> (larecomp tools/build_shader_pack_v6.py), on
+// DXIL and SPIR-V alike. Without it the spec constants stay what they are in
+// Unleashed: a SPIR-V specialization constant, or a function the DXIL library
+// gets linked with.
+// XENOS_ALPHA_COVERAGE marks the variant whose coverage depends on the pixel's
+// alpha: ALPHA_TEST set, which the runtime picks for the alpha test, alpha to
+// coverage or both (Xenia's DoesCoverageDependOnAlpha). Only that variant
+// declares SV_Coverage and can discard; the other one keeps the host's early
+// depth/stencil test, as Xenia's kEarlyHint pixel shader modification does.
+#if !defined(UNLEASHED_RECOMP) && defined(XENOS_SPEC_CONSTANTS)
+    #define XENOS_STATIC_SPEC_CONSTANTS 1
+    #define g_SpecConstants() (uint(XENOS_SPEC_CONSTANTS))
+    #define XENOS_ALPHA_COVERAGE (((XENOS_SPEC_CONSTANTS) & SPEC_CONSTANT_ALPHA_TEST) != 0)
+#else
+    #define XENOS_STATIC_SPEC_CONSTANTS 0
+    #define XENOS_ALPHA_COVERAGE 0
+#endif
+
 #ifdef __spirv__
 
 struct PushConstants
@@ -40,14 +59,18 @@ struct PushConstants
 #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 528)
 #define g_BlendPremultModeRgb     vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 532)
 #define g_BlendPremultModeA       vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 536)
+// Alpha to coverage parameters; see computeAlphaToMask in the generated shader.
+#define g_AlphaToMask             vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 540)
 #define g_BlendPremultConstant    vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 544, 0x10)
 // Vertex shader position epilogue; see the note after these definitions.
 #define g_PosScale               vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 560, 0x10)
 #define g_PosOffset               vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 576, 0x10)
 
+#if !XENOS_STATIC_SPEC_CONSTANTS
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 
 #define g_SpecConstants() g_SpecConstants
+#endif
 
 #else
 
@@ -60,11 +83,28 @@ struct PushConstants
     float g_AlphaThreshold : packoffset(c33.x); \
     uint g_BlendPremultModeRgb : packoffset(c33.y); \
     uint g_BlendPremultModeA : packoffset(c33.z); \
-    float4 g_BlendPremultConstant : packoffset(c34);
+    uint g_AlphaToMask : packoffset(c33.w); \
+    float4 g_BlendPremultConstant : packoffset(c34); \
+    float4 g_PosScale : packoffset(c35); \
+    float4 g_PosOffset : packoffset(c36); \
+    float2 g_InvResolutionScale : packoffset(c37.x);
 
+#if !XENOS_STATIC_SPEC_CONSTANTS
 uint g_SpecConstants();
+#endif
 
 #endif
+
+// g_PosScale and g_PosOffset feed the vertex shader epilogue
+//     oPos.xyz = oPos.xyz * g_PosScale.xyz + g_PosOffset.xyz * oPos.w;
+// which takes the position the Xenos shader exports to the host's clip space.
+// The runtime derives both per draw from what the hardware does after the
+// shader and the host viewport cannot always express: the PA_CL_VTE_CNTL
+// viewport transform (with it disabled the position is already in pixels),
+// the pixel centre convention and the depth range. Identity is (1, 1, 1, *)
+// and (0, 0, 0, *). Outside UNLEASHED_RECOMP g_HalfPixelOffset is not read
+// any more; it keeps its place so that no later offset moves.
+//
 
 Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
 Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);

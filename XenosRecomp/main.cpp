@@ -262,6 +262,7 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
 
             thread_local DxcCompiler dxcCompiler;
 
+        #ifdef UNLEASHED_RECOMP
             IDxcBlob* dxil = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
                 shader.specConstantsMask != 0, false, &shader.dxilError);
             shader.dxilOk = dxil != nullptr;
@@ -273,6 +274,37 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
             shader.spirvOk = spirv != nullptr;
             if (spirv != nullptr)
                 spirv->Release();
+        #else
+            // The variants the LAR pack ships, each with its spec constants fixed
+            // (shader_common.h): 0, and the shader's whole mask when it has one.
+            shader.dxilOk = true;
+            shader.spirvOk = true;
+            for (uint32_t variant = 0; variant < (shader.specConstantsMask != 0 ? 2u : 1u); variant++)
+            {
+                uint32_t specConstants = variant != 0 ? shader.specConstantsMask : 0;
+                std::string error;
+                IDxcBlob* dxil = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
+                    false, false, &error, specConstants);
+                if (dxil != nullptr)
+                    dxil->Release();
+                else if (shader.dxilOk)
+                {
+                    shader.dxilOk = false;
+                    shader.dxilError = fmt::format("spec constants 0x{:X}:\n{}", specConstants, error);
+                }
+
+                error.clear();
+                IDxcBlob* spirv = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
+                    false, true, &error, specConstants);
+                if (spirv != nullptr)
+                    spirv->Release();
+                else if (shader.spirvOk)
+                {
+                    shader.spirvOk = false;
+                    shader.spirvError = fmt::format("spec constants 0x{:X}:\n{}", specConstants, error);
+                }
+            }
+        #endif
 
             size_t currentProgress = ++progress;
             if ((currentProgress % 100) == 0)

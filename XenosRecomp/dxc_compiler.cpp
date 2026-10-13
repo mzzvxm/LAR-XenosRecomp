@@ -11,7 +11,8 @@ DxcCompiler::~DxcCompiler()
     dxcCompiler->Release();
 }
 
-IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv, std::string* errorsOut)
+IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv, std::string* errorsOut,
+    uint32_t staticSpecConstants)
 {
     DxcBuffer source{};
     source.Ptr = shaderSource.c_str();
@@ -57,6 +58,14 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
 #ifdef UNLEASHED_RECOMP
     args[argCount++] = L"-DUNLEASHED_RECOMP";
 #endif
+
+    std::wstring specConstantsDefine;
+    if (staticSpecConstants != NO_STATIC_SPEC_CONSTANTS)
+    {
+        assert(!compileLibrary);
+        specConstantsDefine = L"-DXENOS_SPEC_CONSTANTS=" + std::to_wstring(staticSpecConstants);
+        args[argCount++] = specConstantsDefine.c_str();
+    }
 
     IDxcResult* result = nullptr;
     HRESULT hr = dxcCompiler->Compile(&source, args, argCount, nullptr, IID_PPV_ARGS(&result));
