@@ -26,11 +26,11 @@ Dynamic register indexing is unimplemented. A possible solution is converting re
 
 ### Control Flow
 
-Since HLSL does not support `goto`, control flow instructions are implemented using a `while` loop with a `switch` statement, where a local `pc` variable determines the currently executing block.
+Since HLSL does not support `goto`, control flow instructions are implemented using a `while` loop with one `if (pc <= N)` block per instruction, where a local `pc` variable determines the currently executing block. A `switch` with fall-through cases would express the same thing, but dxil-spirv (used by vkd3d-proton) fails to convert that form in some shaders.
 
 The current implementation has not been thoroughly tested, as Sonic Unleashed contains very few shaders with complex control flow. However, any issues should be relatively easy to fix if problematic cases can be found.
 
-For shaders with simple control flow, the recompiler may choose to flatten it, removing the while loop and switch statements. This allows DXC to optimize the shader more efficiently.
+For shaders with simple control flow, the recompiler may choose to flatten it, removing the while loop and the `pc` blocks. This allows DXC to optimize the shader more efficiently.
 
 ### Constants
 
