@@ -65,6 +65,8 @@ struct PushConstants
 // Vertex shader position epilogue; see the note after these definitions.
 #define g_PosScale               vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 560, 0x10)
 #define g_PosOffset               vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 576, 0x10)
+// Contract v7: 1 / the host target's resolution scale; see the note below.
+#define g_InvResolutionScale      vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 592)
 
 #if !XENOS_STATIC_SPEC_CONSTANTS
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
@@ -105,6 +107,12 @@ uint g_SpecConstants();
 // and (0, 0, 0, *). Outside UNLEASHED_RECOMP g_HalfPixelOffset is not read
 // any more; it keeps its place so that no later offset moves.
 //
+// g_InvResolutionScale (contract v7) is 1 / the scale of the host render
+// target against the guest's (larecomp docs 24.41, M6b). The pixel position
+// a pixel shader receives (SQ_CONTEXT_MISC.param_gen_pos) is given in guest
+// pixels: (iPos.xy * g_InvResolutionScale - 0.5), which is iPos.xy - 0.5 at
+// scale 1, so a shader that turns it into a texture coordinate with the
+// guest's own 1 / screen size (the soft particles) samples the right place.
 
 Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
 Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
