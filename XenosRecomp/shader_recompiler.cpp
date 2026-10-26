@@ -2430,11 +2430,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     }
     else
     {
+        // Each control flow instruction N becomes an `if (pc <= N)` block
+        // instead of a fall-through `case N:` of a `switch (pc)`. A jump
+        // sets pc and continues the loop, and the next pass runs blocks
+        // pc, pc + 1, ... in order, as falling through the cases did.
+        // dxil-spirv (vkd3d-proton) fails to structurize the switch form
+        // of some shaders ("Fatal, detected infinite loop") and aborts the
+        // game; it converts this form.
         out += "\n\tuint pc = 0;\n";
         out += "\twhile (true)\n";
         out += "\t{\n";
-        out += "\t\tswitch (pc)\n";
-        out += "\t\t{\n";
     }
 
     // The blocks the structured form closes before the instruction at an
@@ -2474,7 +2479,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             if (pcMachine)
             {
                 indentation = 3;
-                println("\t\tcase {}:", pc);
+                if (pc != 0)
+                    out += "\t\t}\n";
+                println("\t\tif (pc <= {})", pc);
+                out += "\t\t{\n";
             }
             else
             {
