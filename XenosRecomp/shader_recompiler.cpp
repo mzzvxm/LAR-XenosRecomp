@@ -1970,7 +1970,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     out += "    float offset = float((params >> (index * 2u)) & 3u);\n";
     out += "    uint samplesLog2 = (params >> 9) & 3u;\n";
     out += "    uint coverage = 0u;\n";
-    out += "    if (samplesLog2 == 2u)\n";
+    // Contract v8: 8 samples, which the host gives an image of the screen
+    // the game multisamples at a higher MSAA level (the Xenos has no 8x).
+    // Thresholds in eighths, the dither offset in 1/32 (four pixels make 32
+    // levels, as the 4x branch's 16); the samples covered first are spread
+    // over the pixel (the host's standard 8x positions).
+    out += "    if (samplesLog2 == 3u)\n";
+    out += "    {\n";
+    out += "        float step = offset * (1.0 / 32.0);\n";
+    out += "        coverage |= (alpha >= 0.875 - step) ? 1u : 0u;\n";
+    out += "        coverage |= (alpha >= 1.0 - step) ? 2u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.375 - step) ? 4u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.125 - step) ? 8u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.75 - step) ? 16u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.5 - step) ? 32u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.25 - step) ? 64u : 0u;\n";
+    out += "        coverage |= (alpha >= 0.625 - step) ? 128u : 0u;\n";
+    out += "    }\n";
+    out += "    else if (samplesLog2 == 2u)\n";
     out += "    {\n";
     out += "        float step = offset * (1.0 / 16.0);\n";
     out += "        coverage |= (alpha >= 0.75 - step) ? 1u : 0u;\n";
