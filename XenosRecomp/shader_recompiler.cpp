@@ -2088,7 +2088,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_COLOR3)
             out += ",\n\tout float4 oC3 : SV_Target3";
         if (pixelShader->outputs & PIXEL_SHADER_OUTPUT_DEPTH)
+        {
+        #ifdef UNLEASHED_RECOMP
             out += ",\n\tout float oDepth : SV_Depth";
+        #else
+            // precise for the reason oPos is: a depth that the depth test
+            // compares against other shaders' must not depend on how the
+            // compiler fused or reordered the arithmetic that produced it.
+            out += ",\n\tout precise float oDepth : SV_Depth";
+        #endif
+        }
     }
     else
     {
@@ -2150,7 +2159,23 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         }
     #endif
 
+    #ifdef UNLEASHED_RECOMP
         out += "\tout float4 oPos : SV_Position";
+    #else
+        // precise: nothing that reaches SV_Position is contracted into a fused
+        // multiply-add or reassociated, so two vertex shaders that run the same
+        // guest arithmetic give the host the same bits. MCLA writes its depth
+        // with a Z prepass and draws the colour pass with other vertex shaders
+        // under GREATER_EQUAL; with fast math the driver fused a different
+        // product of the position epilogue in each (the order DXC gave the
+        // fadd's operands decided which), a vertex moved by one ulp, and runs
+        // of the colour pass failed the depth test by one ulp for a frame,
+        // leaving the clear colour on screen. Xenia keeps the same invariance
+        // by not allowing refactoring (DXBC) and with NoContraction plus the
+        // Invariant output decoration (SPIR-V). 18 is SPIR-V's Invariant; the
+        // DXIL compile ignores the attribute like the vk::location ones.
+        out += "\t[[vk::ext_decorate(18)]] out precise float4 oPos : SV_Position";
+    #endif
 
         for (auto& [usage, usageIndex] : INTERPOLATORS)
             print(",\n\tout float4 o{0}{1} : {2}{1}", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
