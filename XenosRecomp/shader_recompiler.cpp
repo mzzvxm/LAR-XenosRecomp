@@ -1965,6 +1965,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     out += "    uint params = g_AlphaToMask;\n";
     out += "    if ((params & 0x100u) == 0u)\n";
     out += "        return 0xFFFFFFFFu;\n";
+    // The thresholds below are multiples of 1/32, and the alpha is a host
+    // float: a vertex shader output that is 1.0 at every vertex reaches the
+    // pixel shader one or two ulps under 1.0 where the host interpolates it
+    // with perspective (MCLA's foliage multiplies its alpha by one, and 44% of
+    // its pixels got 1 - 2^-24 or 1 - 2^-23 on an NVIDIA GPU). The sample
+    // whose threshold is exactly 1.0 -- offset 0 of the dithered pattern --
+    // failed by that ulp, so foliage the game draws opaque lost a sample in
+    // one pixel of every quad, a grid of holes at any sample count. Coverage
+    // is decided on the alpha rounded to 1/65536: exact for every threshold
+    // and every alpha that is a multiple of 1/32, coarser than the host's
+    // rounding. No saturate, so a NaN still covers nothing on SPIR-V too.
+    out += "    alpha = round(alpha * 65536.0) * (1.0 / 65536.0);\n";
     out += "    uint2 p = uint2(pixelPosition);\n";
     out += "    uint index = ((p.x & 1u) << 1) | (p.y & 1u);\n";
     out += "    float offset = float((params >> (index * 2u)) & 3u);\n";
