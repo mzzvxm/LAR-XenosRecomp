@@ -115,9 +115,43 @@ At runtime, shaders are mapped to their recompiled versions using a 64-bit XXH3 
 
 SPIR-V shaders are compressed using smol-v to improve zstd compression efficiency, while DXIL shaders are compressed as-is.
 
+### HLSL Files
+
+With `--hlsl` and an input directory, one `.hlsl` file is written per shader container into the output directory, together with `shader_report.tsv` and `shader_errors.txt`. Each shader is also compiled through DXC to check it. `--no-validate` skips that check and only writes the HLSL:
+
+```
+XenosRecomp [input directory path] [output directory path] [header file path] --hlsl [--no-validate]
+```
+
+### Library
+
+The translator is also built as a static library, `XenosRecompLib`, for programs that translate shaders themselves. It needs only fmt. With `XENOS_RECOMP_BUILD_TOOL` off the command line tool is not built, and zstd, xxHash, smol-v and the DXC binaries are not needed:
+
+```cmake
+set(XENOS_RECOMP_BUILD_TOOL OFF CACHE BOOL "" FORCE)
+add_subdirectory(thirdparty/LAR-XenosRecomp EXCLUDE_FROM_ALL)
+target_link_libraries(my_program PRIVATE XenosRecompLib)
+```
+
+```cpp
+#include "XenosRecomp/container_scan.h"
+#include "XenosRecomp/xenos_recomp.h"
+
+forEachShaderContainer(image, imageSize, [&](size_t offset, size_t size)
+    {
+        xenos_recomp::RecompiledShader shader;
+        if (xenos_recomp::RecompileContainer(image + offset, size, xenos_recomp::ShaderCommonText(), shader))
+        {
+            // shader.hlsl, shader.specConstantsMask, shader.isPixelShader, shader.controlFlowForm
+        }
+    });
+```
+
+`shader_common.h` is embedded in the library (`xenos_recomp::ShaderCommonText()`), and `xenos_recomp::Revision()` returns the commit the library was built from, which anything built from the HLSL should record. The build reads the revision from the `XENOS_RECOMP_REVISION` cache variable, a `REVISION` file in the repository root, or git, in that order.
+
 ## Building
 
-The project requires CMake 3.20 and a C++ compiler with C++17 support to build. While compilers other than Clang might work, they have not been tested. Since the repository includes submodules, ensure you clone it recursively.
+The project requires CMake 3.20 and a C++ compiler with C++17 support to build. While compilers other than Clang might work, they have not been tested. Since the repository includes submodules, ensure you clone it recursively. The library alone only needs the `thirdparty/fmt` submodule.
 
 ## Special Thanks
 
