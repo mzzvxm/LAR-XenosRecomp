@@ -1,0 +1,5 @@
+# The HLSL pasted at the top of every translated shader. Its bytes are part of the
+# translator's output and are embedded in XenosRecompLib, so every checkout has to
+# carry the same ones. Windows line endings are what the shipped shaders were built
+# with.
+XenosRecomp/shader_common.h text eol=crlf
