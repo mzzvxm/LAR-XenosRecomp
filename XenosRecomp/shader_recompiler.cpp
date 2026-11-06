@@ -1,6 +1,17 @@
 #include "shader_recompiler.h"
 #include "shader_common.h"
 
+#include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 static constexpr char SWIZZLES[] = 
 { 
     'x',

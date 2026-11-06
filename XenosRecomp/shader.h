@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+
+#include "be.h"
 #include "constant_table.h"
 
 struct Float4Definition

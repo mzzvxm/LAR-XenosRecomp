@@ -1,5 +1,13 @@
 #pragma once
 
+#include <cstdint>
+#include <iterator>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+
+#include <fmt/format.h>
+
 #include "shader.h"
 #include "shader_code.h"
 

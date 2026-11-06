@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 enum class ControlFlowOpcode : uint32_t
 {
     Nop = 0,

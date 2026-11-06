@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdint>
+
+#include "be.h"
+
 enum class ParameterClass : uint16_t // D3DXPARAMETER_CLASS
 {
     Scalar,
