@@ -9,7 +9,7 @@
 #include <cstring>
 #include <string>
 
-#include "shader.h"
+#include "shader_container.h"
 
 // True when the available bytes at data start with a shader container. dataSize
 // receives the size the container declares for itself. This is the signature

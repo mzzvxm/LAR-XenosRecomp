@@ -4,6 +4,7 @@
 
 #include "be.h"
 #include "constant_table.h"
+#include "shader_container.h"
 
 struct Float4Definition
 {
@@ -94,17 +95,4 @@ struct PixelShader : Shader
     be<uint32_t> field18;
     be<PixelShaderOutputs> outputs;
     be<uint32_t> interpolators[];
-};
-
-struct ShaderContainer
-{
-    be<uint32_t> flags;
-    be<uint32_t> virtualSize;
-    be<uint32_t> physicalSize;
-    be<uint32_t> fieldC;
-    be<uint32_t> constantTableOffset;
-    be<uint32_t> definitionTableOffset;
-    be<uint32_t> shaderOffset;
-    be<uint32_t> field1C;
-    be<uint32_t> field20;
 };

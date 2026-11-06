@@ -60,6 +60,7 @@ add_library(XenosRecompLib STATIC
     container_scan.h
     shader.h
     shader_code.h
+    shader_container.h
     shader_recompiler.cpp
     shader_recompiler.h
     xenos_recomp.cpp
@@ -99,6 +100,7 @@ add_executable(XenosRecomp
     pch.h
     shader.h
     shader_code.h
+    shader_container.h
     shader_recompiler.h
     "${SMOLV_SOURCE_DIR}/smolv.cpp")
 
