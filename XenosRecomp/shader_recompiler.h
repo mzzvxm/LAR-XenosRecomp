@@ -51,6 +51,10 @@ struct ShaderRecompiler : StringBuffer
     uint32_t specConstantsMask = 0;
     ControlFlowForm controlFlowForm = ControlFlowForm::Flat;
 
+    // Set when the shader refers to something its container never declares (a
+    // vertex element or an interpolator). recompile() then returns false.
+    bool malformed = false;
+
     // Set by a pre-pass over the control flow when the shader actually issues
     // setTexLOD / setGradientsHorz / setGradientsVert. Shaders that never touch
     // the implicit fetch state keep emitting plain Sample() calls.
@@ -75,5 +79,7 @@ struct ShaderRecompiler : StringBuffer
     void recompile(const TextureFetchInstruction& instr, bool bicubic);
     void recompile(const AluInstruction& instr);
 
-    void recompile(const uint8_t* shaderData, const std::string_view& include);
+    // Returns false, instead of asserting, when the data is not a usable shader
+    // container. The output is only meaningful when it returns true.
+    bool recompile(const uint8_t* shaderData, const std::string_view& include);
 };

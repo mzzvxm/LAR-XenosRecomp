@@ -229,7 +229,11 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     out += " = ";
 
     auto findResult = vertexElements.find(address);
-    assert(findResult != vertexElements.end());
+    if (findResult == vertexElements.end())
+    {
+        malformed = true;
+        return;
+    }
 
     switch (findResult->second.usage)
     {
@@ -851,7 +855,12 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             default:
             {
                 auto findResult = interpolators.find(instr.vectorDest);
-                assert(findResult != interpolators.end());
+                if (findResult == interpolators.end())
+                {
+                    malformed = true;
+                    return;
+                }
+
                 exportRegister = findResult->second;
                 break;
             }
@@ -1578,12 +1587,12 @@ static ControlFlowPlan planControlFlow(const std::vector<ControlFlowInstruction>
     return plan;
 }
 
-void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_view& include)
+bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_view& include)
 {
     const auto shaderContainer = reinterpret_cast<const ShaderContainer*>(shaderData);
 
-    assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
-    assert(shaderContainer->constantTableOffset != NULL);
+    if ((shaderContainer->flags & 0xFFFFFF00) != 0x102A1100 || shaderContainer->constantTableOffset == 0)
+        return false;
 
     out += include;
     out += '\n';
@@ -3015,4 +3024,6 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 #endif
 
     out += "}";
+
+    return !malformed;
 }
