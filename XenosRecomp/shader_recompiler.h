@@ -10,6 +10,7 @@
 
 #include "shader.h"
 #include "shader_code.h"
+#include "xenos_recomp.h" // ControlFlowForm
 
 struct StringBuffer
 {
@@ -27,15 +28,6 @@ struct StringBuffer
         fmt::vformat_to(std::back_inserter(out), fmt.get(), fmt::make_format_args(args...));
         out += '\n';
     }
-};
-
-// How the control flow program of a shader was translated; see planControlFlow
-// in shader_recompiler.cpp.
-enum class ControlFlowForm
-{
-    Flat,       // no jumps
-    Structured, // jumps expressed as if / if-else statements
-    PcMachine   // a switch over the control flow index inside a loop
 };
 
 struct ShaderRecompiler : StringBuffer

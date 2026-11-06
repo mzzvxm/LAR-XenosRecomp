@@ -6,8 +6,54 @@ if (WIN32)
     option(XENOS_RECOMP_DXIL "Generate DXIL shader cache" ON)
 endif()
 
-# The translator as a library: shader_recompiler.cpp and nothing else, so a
-# program can embed it without zstd, xxHash, smol-v or DXC. Needs fmt::fmt.
+# The revision the library reports (xenos_recomp::Revision). Set
+# XENOS_RECOMP_REVISION to choose it. Otherwise a REVISION file in the repository
+# root is used, which lets a copy of the sources without git history say which
+# commit it is, and then the commit git reports for this directory.
+set(XENOS_RECOMP_REVISION "" CACHE STRING "Revision the library reports; empty reads REVISION or git")
+set(xenosRecompRevision "${XENOS_RECOMP_REVISION}")
+
+if (xenosRecompRevision STREQUAL "" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../REVISION")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../REVISION" xenosRecompRevision LIMIT_COUNT 1)
+endif()
+
+if (xenosRecompRevision STREQUAL "")
+    find_package(Git QUIET)
+    if (GIT_FOUND)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short=12 HEAD
+            OUTPUT_VARIABLE gitRevision
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE gitResult
+            ERROR_QUIET)
+        if (gitResult EQUAL 0)
+            set(xenosRecompRevision "${gitRevision}")
+        endif()
+    endif()
+endif()
+
+if (xenosRecompRevision STREQUAL "")
+    set(xenosRecompRevision "unknown")
+endif()
+
+# xenos_recomp::kShaderCommonText: shader_common.h as bytes in the library.
+set(SHADER_COMMON_TEXT_CPP "${CMAKE_CURRENT_BINARY_DIR}/shader_common_text.cpp")
+
+add_custom_command(
+    OUTPUT "${SHADER_COMMON_TEXT_CPP}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/shader_common.h"
+        "-DOUTPUT=${SHADER_COMMON_TEXT_CPP}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_shader_common.cmake"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/shader_common.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/embed_shader_common.cmake"
+    COMMENT "Embedding shader_common.h"
+    VERBATIM)
+
+# The translator as a library: shader_recompiler.cpp and the interface in
+# xenos_recomp.h, so a program can embed it without zstd, xxHash, smol-v or DXC.
+# Needs fmt::fmt.
 add_library(XenosRecompLib STATIC
     be.h
     constant_table.h
@@ -15,7 +61,10 @@ add_library(XenosRecompLib STATIC
     shader.h
     shader_code.h
     shader_recompiler.cpp
-    shader_recompiler.h)
+    shader_recompiler.h
+    xenos_recomp.cpp
+    xenos_recomp.h
+    "${SHADER_COMMON_TEXT_CPP}")
 
 target_compile_features(XenosRecompLib PUBLIC cxx_std_17)
 
@@ -24,6 +73,8 @@ target_include_directories(XenosRecompLib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..
 target_include_directories(XenosRecompLib PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_link_libraries(XenosRecompLib PRIVATE fmt::fmt)
+
+target_compile_definitions(XenosRecompLib PRIVATE XENOS_RECOMP_REVISION="${xenosRecompRevision}")
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     target_compile_options(XenosRecompLib PRIVATE -Wno-switch -Wno-unused-variable -Wno-null-arithmetic -fms-extensions)
