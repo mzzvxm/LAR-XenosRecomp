@@ -54,8 +54,9 @@ struct HlslShader
 // Emits one .hlsl per unique shader container found under the input directory and
 // validates each one through DXC for both DXIL and SPIR-V. Failures are recorded
 // per shader instead of aborting, so a single bad shader cannot hide the state of
-// the other few thousand.
-static int recompileDirectoryToHlsl(const char* input, const char* output, const std::string_view& include)
+// the other few thousand. With validate off the DXC step is skipped: only the HLSL
+// is written, and the report says "skipped" in the dxil and spirv columns.
+static int recompileDirectoryToHlsl(const char* input, const char* output, const std::string_view& include, bool validate)
 {
     std::filesystem::path inputRoot(input);
     std::filesystem::path outputRoot(output);
@@ -159,51 +160,59 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
 
             writeAllBytes(shader.outputPath.c_str(), shader.hlsl.data(), shader.hlsl.size());
 
-            thread_local DxcCompiler dxcCompiler;
-
-        #ifdef UNLEASHED_RECOMP
-            IDxcBlob* dxil = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
-                shader.specConstantsMask != 0, false, &shader.dxilError);
-            shader.dxilOk = dxil != nullptr;
-            if (dxil != nullptr)
-                dxil->Release();
-
-            IDxcBlob* spirv = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
-                false, true, &shader.spirvError);
-            shader.spirvOk = spirv != nullptr;
-            if (spirv != nullptr)
-                spirv->Release();
-        #else
-            // The variants the LAR pack ships, each with its spec constants fixed
-            // (shader_common.h): 0, and the shader's whole mask when it has one.
-            shader.dxilOk = true;
-            shader.spirvOk = true;
-            for (uint32_t variant = 0; variant < (shader.specConstantsMask != 0 ? 2u : 1u); variant++)
+            if (validate)
             {
-                uint32_t specConstants = variant != 0 ? shader.specConstantsMask : 0;
-                std::string error;
+                thread_local DxcCompiler dxcCompiler;
+
+            #ifdef UNLEASHED_RECOMP
                 IDxcBlob* dxil = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
-                    false, false, &error, specConstants);
+                    shader.specConstantsMask != 0, false, &shader.dxilError);
+                shader.dxilOk = dxil != nullptr;
                 if (dxil != nullptr)
                     dxil->Release();
-                else if (shader.dxilOk)
-                {
-                    shader.dxilOk = false;
-                    shader.dxilError = fmt::format("spec constants 0x{:X}:\n{}", specConstants, error);
-                }
 
-                error.clear();
                 IDxcBlob* spirv = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
-                    false, true, &error, specConstants);
+                    false, true, &shader.spirvError);
+                shader.spirvOk = spirv != nullptr;
                 if (spirv != nullptr)
                     spirv->Release();
-                else if (shader.spirvOk)
+            #else
+                // The variants the LAR pack ships, each with its spec constants fixed
+                // (shader_common.h): 0, and the shader's whole mask when it has one.
+                shader.dxilOk = true;
+                shader.spirvOk = true;
+                for (uint32_t variant = 0; variant < (shader.specConstantsMask != 0 ? 2u : 1u); variant++)
                 {
-                    shader.spirvOk = false;
-                    shader.spirvError = fmt::format("spec constants 0x{:X}:\n{}", specConstants, error);
+                    uint32_t specConstants = variant != 0 ? shader.specConstantsMask : 0;
+                    std::string error;
+                    IDxcBlob* dxil = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
+                        false, false, &error, specConstants);
+                    if (dxil != nullptr)
+                        dxil->Release();
+                    else if (shader.dxilOk)
+                    {
+                        shader.dxilOk = false;
+                        shader.dxilError = fmt::format("spec constants 0x{:X}:\n{}", specConstants, error);
+                    }
+
+                    error.clear();
+                    IDxcBlob* spirv = dxcCompiler.compile(shader.hlsl, shader.isPixelShader,
+                        false, true, &error, specConstants);
+                    if (spirv != nullptr)
+                        spirv->Release();
+                    else if (shader.spirvOk)
+                    {
+                        shader.spirvOk = false;
+                        shader.spirvError = fmt::format("spec constants 0x{:X}:\n{}", specConstants, error);
+                    }
                 }
+            #endif
             }
-        #endif
+            else
+            {
+                shader.dxilOk = true;
+                shader.spirvOk = true;
+            }
 
             size_t currentProgress = ++progress;
             if ((currentProgress % 100) == 0)
@@ -245,8 +254,8 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
             shader.isPixelShader ? "ps" : "vs",
             shader.specConstantsMask,
             std::filesystem::relative(shader.outputPath, outputRoot).generic_string(),
-            shader.dxilOk ? "ok" : "FAIL",
-            shader.spirvOk ? "ok" : "FAIL",
+            validate ? (shader.dxilOk ? "ok" : "FAIL") : "skipped",
+            validate ? (shader.spirvOk ? "ok" : "FAIL") : "skipped",
             CONTROL_FLOW_FORM_NAMES[uint32_t(shader.controlFlowForm)]);
 
         if (!shader.dxilOk || !shader.spirvOk)
@@ -271,8 +280,15 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
     fmt::println("");
     fmt::println("Shaders             : {} ({} vertex, {} pixel)", shaders.size(), vertexShaders, shaders.size() - vertexShaders);
     fmt::println("HLSL emitted        : {}", shaders.size());
-    fmt::println("DXIL compiled       : {} ({} failed)", shaders.size() - dxilFailures, dxilFailures);
-    fmt::println("SPIR-V compiled     : {} ({} failed)", shaders.size() - spirvFailures, spirvFailures);
+    if (validate)
+    {
+        fmt::println("DXIL compiled       : {} ({} failed)", shaders.size() - dxilFailures, dxilFailures);
+        fmt::println("SPIR-V compiled     : {} ({} failed)", shaders.size() - spirvFailures, spirvFailures);
+    }
+    else
+    {
+        fmt::println("DXC check           : skipped (--no-validate)");
+    }
     fmt::println("Control flow        : {} flat, {} structured, {} pc machine",
         controlFlowForms[0], controlFlowForms[1], controlFlowForms[2]);
 
@@ -292,11 +308,14 @@ int main(int argc, char** argv)
 {
     std::vector<const char*> positional;
     bool hlslMode = false;
+    bool validate = true;
 
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--hlsl") == 0)
             hlslMode = true;
+        else if (strcmp(argv[i], "--no-validate") == 0)
+            validate = false;
         else
             positional.push_back(argv[i]);
     }
@@ -304,10 +323,11 @@ int main(int argc, char** argv)
 #ifndef XENOS_RECOMP_INPUT
     if (positional.size() < 3)
     {
-        printf("Usage: XenosRecomp [input path] [output path] [shader common header file path] [--hlsl]\n");
+        printf("Usage: XenosRecomp [input path] [output path] [shader common header file path] [--hlsl [--no-validate]]\n");
         printf("  input file  + output file : recompile a single shader container to HLSL\n");
         printf("  input dir   + output file : build a DXIL/SPIR-V shader cache .cpp\n");
         printf("  input dir   + output dir  + --hlsl : emit one .hlsl per shader and validate through DXC\n");
+        printf("                                       (--no-validate skips the DXC check)\n");
         return 0;
     }
 #endif
@@ -348,7 +368,7 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        return recompileDirectoryToHlsl(input, output, include);
+        return recompileDirectoryToHlsl(input, output, include, validate);
     }
 
     if (std::filesystem::is_directory(input))
