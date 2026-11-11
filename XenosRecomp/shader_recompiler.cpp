@@ -1604,6 +1604,8 @@ bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     out += "#ifdef __spirv__\n\n";
 
+    const uint32_t registerFileSize = isPixelShader ? 224 : 256;
+
 #ifdef UNLEASHED_RECOMP
     bool isMetaInstancer = false;
     bool hasIndexCount = false;
@@ -1641,10 +1643,16 @@ bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             if (constantInfo->registerCount > 1)
             {
-                uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
-
-                println("#define {}(INDEX) select((INDEX) < {}, vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10), 0.0)",
-                    constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1);
+                // INDEX is relative to this parameter's first register, so
+                // registerIndex + INDEX is the absolute register the shader
+                // addresses (a0 and aL are signed, the sum can go below 0). The
+                // hardware reads zero for a register outside the file on either
+                // side, and the load below must stay inside the file as well:
+                // a select evaluates both of its arms, and a raw device-address
+                // load has no bounds check. One unsigned compare covers both
+                // ends, since a negative register wraps to a huge uint.
+                println("#define {0}(INDEX) select(uint({1} + (INDEX)) < {2}u, vk::RawBufferLoad<float4>(g_PushConstants.{3}ShaderConstants + min(uint({1} + (INDEX)), {4}u) * 16, 0x10), 0.0)",
+                    constantName, constantInfo->registerIndex.get(), registerFileSize, shaderName, registerFileSize - 1);
             }
             else
             {
@@ -1679,8 +1687,6 @@ bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     }
 
     out += "\n#else\n\n";
-
-    const uint32_t registerFileSize = isPixelShader ? 224 : 256;
 
     // The D3D9 effect framework happily lets two parameters share float4
     // registers when they can never be live at the same time, e.g. Midnight
@@ -1860,8 +1866,9 @@ bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             {
                 if (constantInfo->registerCount > 1)
                 {
-                    println("#define {0}(INDEX) select((INDEX) < {1}, g_{2}ShaderConstantFile[{3} + min(INDEX, {4})], 0.0)",
-                        constantName, tailCount, shaderStageName, constantInfo->registerIndex.get(), tailCount - 1);
+                    // Same range check as the SPIR-V accessor above.
+                    println("#define {0}(INDEX) select(uint({3} + (INDEX)) < {1}u, g_{2}ShaderConstantFile[min(uint({3} + (INDEX)), {4}u)], 0.0)",
+                        constantName, registerFileSize, shaderStageName, constantInfo->registerIndex.get(), registerFileSize - 1);
                 }
                 else
                 {
@@ -1880,7 +1887,13 @@ bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             println(" : packoffset(c{});", constantInfo->registerIndex.get());
 
             if (constantInfo->registerCount > 1)
-                println("#define {0}(INDEX) select((INDEX) < {1}, {0}[min(INDEX, {2})], 0.0)", constantName, tailCount, tailCount - 1);
+            {
+                // This form is only chosen when no instruction addresses a
+                // constant through a0/aL, so INDEX is a literal within the
+                // parameter. The unsigned compare still keeps a negative index
+                // from ever leaving the declared constants.
+                println("#define {0}(INDEX) select(uint(INDEX) < {1}u, {0}[min(uint(INDEX), {2}u)], 0.0)", constantName, tailCount, tailCount - 1);
+            }
         }
     }
 
