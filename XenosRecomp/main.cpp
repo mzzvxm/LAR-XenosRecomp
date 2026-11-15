@@ -245,7 +245,8 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
         if (!shader.spirvOk)
             ++spirvFailures;
 
-        mostVertexInputs = std::max(mostVertexInputs, shader.vertexInputCount);
+        if (shader.vertexInputCount > mostVertexInputs)
+            mostVertexInputs = shader.vertexInputCount;
         if (shader.vertexInputCount > xenos_recomp::kVertexInputsGuaranteed)
         {
             manyInputShaders.push_back(fmt::format("{} ({} vertex inputs)",
