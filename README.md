@@ -64,7 +64,7 @@ Certain semantics are forced to be `uint4` instead of `float4` for specific shad
 
 Instanced geometry is handled completely manually on the Xbox 360. In Sonic Unleashed, the index buffer is passed as a vertex stream, and shaders use it to arbitrarily fetch vertex data, relying on a `g_IndexCount` constant to determine the index of the current instance. Unleashed Recompiled handles this by expecting instanced data to be in the second vertex stream and the index buffer to be in the `POSITION1` semantic. This behavior is completely game specific and must be manually implemented for other games.
 
-Vulkan vertex locations are currently hardcoded for Unleashed Recompiled, chosen based on Sonic Unleashed's shaders while taking the 16 location limit into account. A generic solution would assign unique locations per vertex shader and dynamically create vertex declarations at runtime.
+Vulkan vertex locations are assigned per vertex shader: its inputs are numbered 0 to n-1, in a fixed order of usages (`vertex_locations.h`), so a pipeline needs only as many locations as the shader has inputs. A program that builds the pipelines numbers the inputs of each one by the same rule from the shader's list of vertex elements, and `RecompiledShader::vertexInputCount` tells how many a shader has (more than the 16 every Vulkan device offers is translated all the same, for the caller to warn about). DXIL ignores the locations: Direct3D 12 matches inputs by semantic name and index.
 
 Mini vertex fetch instructions and vertex fetch bindings are unimplemented.
 

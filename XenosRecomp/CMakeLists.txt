@@ -63,6 +63,7 @@ add_library(XenosRecompLib STATIC
     shader_container.h
     shader_recompiler.cpp
     shader_recompiler.h
+    vertex_locations.h
     xenos_recomp.cpp
     xenos_recomp.h
     "${SHADER_COMMON_TEXT_CPP}")
@@ -84,6 +85,12 @@ endif()
 if (WIN32)
     target_compile_definitions(XenosRecompLib PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
+
+# A check of how a vertex shader's inputs are numbered (vertex_locations.h) and of the HLSL the
+# translator makes from it, on a container made in memory (no game data):
+#   cmake --build <dir> --target XenosRecompVertexLocationsTest, then run it (exit 0 = passed).
+add_executable(XenosRecompVertexLocationsTest EXCLUDE_FROM_ALL vertex_locations_test.cpp)
+target_link_libraries(XenosRecompVertexLocationsTest PRIVATE XenosRecompLib)
 
 if (NOT XENOS_RECOMP_BUILD_TOOL)
     return()

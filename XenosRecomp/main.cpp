@@ -43,6 +43,7 @@ struct HlslShader
     uint32_t specConstantsMask = 0;
     bool isPixelShader = false;
     ControlFlowForm controlFlowForm = ControlFlowForm::Flat;
+    uint32_t vertexInputCount = 0;
     bool recompiled = false;
     bool dxilOk = false;
     bool spirvOk = false;
@@ -156,6 +157,7 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
             shader.specConstantsMask = recompiler.specConstantsMask;
             shader.isPixelShader = recompiler.isPixelShader;
             shader.controlFlowForm = recompiler.controlFlowForm;
+            shader.vertexInputCount = recompiler.vertexInputCount;
             shader.recompiled = !shader.hlsl.empty();
 
             writeAllBytes(shader.outputPath.c_str(), shader.hlsl.data(), shader.hlsl.size());
@@ -224,6 +226,8 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
     size_t vertexShaders = 0;
     size_t controlFlowForms[3] = {};
     std::vector<std::string> pcMachineShaders;
+    uint32_t mostVertexInputs = 0;
+    std::vector<std::string> manyInputShaders;
 
     static constexpr const char* CONTROL_FLOW_FORM_NAMES[] = { "flat", "structured", "pc_machine" };
 
@@ -240,6 +244,13 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
             ++dxilFailures;
         if (!shader.spirvOk)
             ++spirvFailures;
+
+        mostVertexInputs = std::max(mostVertexInputs, shader.vertexInputCount);
+        if (shader.vertexInputCount > xenos_recomp::kVertexInputsGuaranteed)
+        {
+            manyInputShaders.push_back(fmt::format("{} ({} vertex inputs)",
+                std::filesystem::relative(shader.outputPath, outputRoot).generic_string(), shader.vertexInputCount));
+        }
 
         ++controlFlowForms[uint32_t(shader.controlFlowForm)];
         if (shader.controlFlowForm == ControlFlowForm::PcMachine)
@@ -298,6 +309,13 @@ static int recompileDirectoryToHlsl(const char* input, const char* output, const
     std::sort(pcMachineShaders.begin(), pcMachineShaders.end());
     for (auto& name : pcMachineShaders)
         fmt::println("  pc machine        : {}", name);
+    fmt::println("Vertex inputs       : at most {} per vertex shader, locations 0 to n-1", mostVertexInputs);
+
+    // Still translated: a device that offers fewer inputs than the largest count
+    // cannot run those shaders (Vulkan guarantees 16).
+    std::sort(manyInputShaders.begin(), manyInputShaders.end());
+    for (auto& name : manyInputShaders)
+        fmt::println("  warning           : {} is above the {} vertex inputs every Vulkan device offers", name, xenos_recomp::kVertexInputsGuaranteed);
     fmt::println("Report              : {}", reportPath);
     fmt::println("Errors              : {}", errorsPath);
 

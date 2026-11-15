@@ -10,6 +10,8 @@
 #include <string>
 #include <string_view>
 
+#include "vertex_locations.h" // kVertexInputsGuaranteed, the numbering rule of the vertex inputs
+
 // How the control flow program of a shader was translated; see planControlFlow
 // in shader_recompiler.cpp.
 enum class ControlFlowForm
@@ -28,6 +30,12 @@ struct RecompiledShader
     uint32_t specConstantsMask = 0;
     bool isPixelShader = false;
     ControlFlowForm controlFlowForm = ControlFlowForm::Flat;
+    // A vertex shader's number of vertex inputs (0 for a pixel shader). Their
+    // Vulkan locations are 0 to this minus 1, in the order vertex_locations.h
+    // gives. More than kVertexInputsGuaranteed (16, what every Vulkan device
+    // offers) is translated all the same: the caller warns, and the renderer
+    // compares the largest count with what its device offers.
+    uint32_t vertexInputCount = 0;
 };
 
 // Translates one Xbox 360 shader container to HLSL. container points at the

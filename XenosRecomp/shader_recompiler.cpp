@@ -96,37 +96,15 @@ static constexpr const char* USAGE_SEMANTICS[] =
     "SAMPLE"
 };
 
-struct DeclUsageLocation
-{
-    DeclUsage usage;
-    uint32_t usageIndex;
-    uint32_t location;
-};
-
-// NOTE: These are specialized Vulkan locations for Unleashed Recompiled. Change as necessary. Likely not going to work with other games.
-static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
-{
-    { DeclUsage::Position, 0, 0 },
-    { DeclUsage::Normal, 0, 1 },
-    { DeclUsage::Tangent, 0, 2 },
-    { DeclUsage::Binormal, 0, 3 },
-    { DeclUsage::TexCoord, 0, 4 },
-    { DeclUsage::TexCoord, 1, 5 },
-    { DeclUsage::TexCoord, 2, 6 },
-    { DeclUsage::TexCoord, 3, 7 },
-    { DeclUsage::Color, 0, 8 },
-    { DeclUsage::BlendIndices, 0, 9 },
-    { DeclUsage::BlendWeight, 0, 10 },
-    { DeclUsage::Color, 1, 11 },
-    { DeclUsage::TexCoord, 4, 12 },
-    { DeclUsage::TexCoord, 5, 13 },
-    { DeclUsage::TexCoord, 6, 14 },
-    { DeclUsage::TexCoord, 7, 15 },
-    // POSITION1 previously shared location 15 with TEXCOORD7, which is a SPIR-V
-    // validation error for any vertex shader declaring both. Midnight Club uses
-    // POSITION1 as a real vertex element in 8 shaders, so it gets its own slot.
-    { DeclUsage::Position, 1, 16 },
-};
+// The Vulkan locations of the vertex inputs are not fixed per usage: each vertex
+// shader numbers its own inputs 0 to n-1, in the order of the old fixed table
+// (vertex_locations.h), so that no pipeline needs more locations than the shader
+// has inputs.
+static_assert(uint32_t(DeclUsage::Position) == 0 && uint32_t(DeclUsage::BlendWeight) == 1 &&
+    uint32_t(DeclUsage::BlendIndices) == 2 && uint32_t(DeclUsage::Normal) == 3 &&
+    uint32_t(DeclUsage::TexCoord) == 5 && uint32_t(DeclUsage::Tangent) == 6 &&
+    uint32_t(DeclUsage::Binormal) == 7 && uint32_t(DeclUsage::Color) == 10,
+    "vertex_locations.h numbers the usages as DeclUsage does");
 
 static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
 {
@@ -2147,6 +2125,28 @@ bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     else
     {
         auto vertexShader = reinterpret_cast<const VertexShader*>(shader);
+
+        // The inputs' Vulkan locations: 0 to n-1 over this shader's own inputs
+        // (see vertex_locations.h; the renderer numbers its pipeline's inputs
+        // by the same rule from the shader's list of vertex elements).
+        std::vector<xenos_recomp::VertexInput> vertexInputs;
+        vertexInputs.reserve(vertexShader->vertexElementCount);
+
+        for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
+        {
+            union
+            {
+                VertexElement vertexElement;
+                uint32_t value;
+            };
+
+            value = vertexShader->vertexElementsAndInterpolators[vertexShader->field18 + i];
+            vertexInputs.push_back({ uint32_t(vertexElement.usage), uint32_t(vertexElement.usageIndex) });
+        }
+
+        const std::vector<uint32_t> vertexInputLocations = xenos_recomp::assignVertexLocations(vertexInputs.data(), vertexInputs.size());
+        vertexInputCount = uint32_t(vertexInputs.size());
+
         for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
         {
             union
@@ -2169,14 +2169,9 @@ bool ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             out += '\t';
 
-            for (auto& usageLocation : USAGE_LOCATIONS)
-            {
-                if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
-                {
-                    print("[[vk::location({})]] ", usageLocation.location);
-                    break;
-                }
-            }
+            // Every input has a location (a shader that gives some inputs a
+            // location has to give them all one).
+            print("[[vk::location({})]] ", vertexInputLocations[i]);
 
             println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
                 uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
