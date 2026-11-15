@@ -28,6 +28,7 @@ bool RecompileContainer(const uint8_t* container, size_t size, std::string_view 
     result.specConstantsMask = recompiler.specConstantsMask;
     result.isPixelShader = recompiler.isPixelShader;
     result.controlFlowForm = recompiler.controlFlowForm;
+    result.vertexInputCount = recompiler.vertexInputCount;
     return true;
 }
 

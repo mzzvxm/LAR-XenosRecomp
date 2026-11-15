@@ -10,6 +10,7 @@
 
 #include "shader.h"
 #include "shader_code.h"
+#include "vertex_locations.h"
 #include "xenos_recomp.h" // ControlFlowForm
 
 struct StringBuffer
@@ -42,6 +43,10 @@ struct ShaderRecompiler : StringBuffer
     std::unordered_map<uint32_t, const char*> samplers;
     uint32_t specConstantsMask = 0;
     ControlFlowForm controlFlowForm = ControlFlowForm::Flat;
+
+    // How many vertex inputs a vertex shader declares (0 for a pixel shader);
+    // their Vulkan locations are 0 to this minus 1 (vertex_locations.h).
+    uint32_t vertexInputCount = 0;
 
     // Set when the shader refers to something its container never declares (a
     // vertex element or an interpolator). recompile() then returns false.
